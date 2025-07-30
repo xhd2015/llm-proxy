@@ -141,6 +141,16 @@ func (t *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	duration := time.Since(start)
 	log.Printf("Response: %s, ContentLength: %d, Duration: %s", resp.Status, resp.ContentLength, duration)
 
+	if resp.StatusCode >= 300 {
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			log.Printf("Error reading response body: %v", err)
+			return nil, err
+		}
+		resp.Body = io.NopCloser(bytes.NewBuffer(respBody))
+		log.Printf("Error Response body: %s", string(respBody))
+	}
+
 	return resp, nil
 }
 
