@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	_ "embed"
+
 	"github.com/xhd2015/less-gen/flags"
 )
 
@@ -32,6 +34,8 @@ Options:
 
 Examples:
    llm-proxy --base-url http://localhost:8081 --model model-alias=actual-model
+
+   llm-proxy doc
 `
 
 func main() {
@@ -42,13 +46,13 @@ func main() {
 	}
 }
 func Handle(args []string) error {
-	// if len(args) > 0 {
-	// 	arg0 := args[0]
-	// 	switch arg0 {
-	// 	case "example":
-	// 		return handleExample(args[1:])
-	// 	}
-	// }
+	if len(args) > 0 {
+		arg0 := args[0]
+		switch arg0 {
+		case "doc":
+			return handleDoc(args[1:])
+		}
+	}
 	var verbose bool
 	var baseUrl string
 	var modelMappings []string
@@ -65,7 +69,7 @@ func Handle(args []string) error {
 		return err
 	}
 	if len(args) > 0 {
-		return fmt.Errorf("unrecognized extra arguments: %s", strings.Join(args, " "))
+		return fmt.Errorf("unrecognized extra args: %s", strings.Join(args, " "))
 	}
 	if baseUrl == "" {
 		return fmt.Errorf("missing --base-url")
@@ -286,4 +290,12 @@ func skipTextContainingSnapshot(data map[string]interface{}) bool {
 		// modified = true
 	}
 	return false
+}
+
+//go:embed README.md
+var README string
+
+func handleDoc(args []string) error {
+	fmt.Println(README)
+	return nil
 }
