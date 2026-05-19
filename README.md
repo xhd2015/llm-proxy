@@ -73,6 +73,12 @@ Use `--codex` when Codex is signed in with ChatGPT/OAuth and you want to route C
 llm-proxy --codex --port 8891
 ```
 
+Append full proxy logs while keeping terminal output brief:
+
+```sh
+llm-proxy --codex --port 8891 --log proxy.log
+```
+
 Configure Codex with the built-in OpenAI provider:
 
 ```toml

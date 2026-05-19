@@ -32,6 +32,7 @@ Options:
                                    e.g. {"type":"text","text":" tool...", "snapshot":"A tool..."}
 							       a workaround for sst/opencode
   -v,--verbose                     show verbose info  
+  --log FILE                       append full proxy logs to FILE while keeping terminal logs brief
   --open-ai                        start a local proxy to OpenAI with usage tracking
   --codex                          start a local proxy to Codex's ChatGPT OAuth backend
   --usages                         show usage summary from the usage log
@@ -64,10 +65,12 @@ func Handle(args []string) error {
 	var baseUrl string
 	var modelMappings []string
 	var port string
+	var logFile string
 	var filterTextSnapshot bool
 	args, err := flags.String("--base-url", &baseUrl).
 		StringSlice("--model", &modelMappings).
 		String("--port", &port).
+		String("--log", &logFile).
 		Bool("--filter-text-snapshot", &filterTextSnapshot).
 		Bool("-v,--verbose", &verbose).
 		Bool("--open-ai", &openAI).
@@ -88,10 +91,10 @@ func Handle(args []string) error {
 		return fmt.Errorf("unrecognized extra args: %s", strings.Join(args, " "))
 	}
 	if openAI {
-		return openai.StartAPIProxy(baseUrl, modelMappings, port, verbose)
+		return openai.StartAPIProxy(baseUrl, modelMappings, port, verbose, logFile)
 	}
 	if codex {
-		return openai.StartCodexProxy(baseUrl, modelMappings, port, verbose)
+		return openai.StartCodexProxy(baseUrl, modelMappings, port, verbose, logFile)
 	}
 	if baseUrl == "" {
 		return fmt.Errorf("missing --base-url")
@@ -110,7 +113,15 @@ func Handle(args []string) error {
 		return fmt.Errorf("invalid --base-url: %w", err)
 	}
 
-	proxy := newProxy(target, modelMap, filterTextSnapshot, verbose)
+	fullLogger, closeFullLogger, err := openAppendLog(logFile)
+	if err != nil {
+		return err
+	}
+	if closeFullLogger != nil {
+		defer closeFullLogger.Close()
+	}
+
+	proxy := newProxy(target, modelMap, filterTextSnapshot, verbose, fullLogger)
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		proxy.ServeHTTP(w, r)
@@ -118,6 +129,9 @@ func Handle(args []string) error {
 
 	addr := ":" + port
 	log.Printf("Starting proxy server on %s", addr)
+	if logFile != "" {
+		log.Printf("Full proxy log: %s", logFile)
+	}
 	return http.ListenAndServe(addr, nil)
 }
 
@@ -133,7 +147,18 @@ func parseModelMap(modelMappings []string) (map[string]string, error) {
 	return modelMap, nil
 }
 
-func newProxy(target *url.URL, modelMap map[string]string, filterTextSnapshot bool, verbose bool) *httputil.ReverseProxy {
+func openAppendLog(logFile string) (*log.Logger, io.Closer, error) {
+	if logFile == "" {
+		return nil, nil, nil
+	}
+	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open --log file: %w", err)
+	}
+	return log.New(f, log.Prefix(), log.Flags()), f, nil
+}
+
+func newProxy(target *url.URL, modelMap map[string]string, filterTextSnapshot bool, verbose bool, fullLogger *log.Logger) *httputil.ReverseProxy {
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.Director = func(req *http.Request) {
 		req.URL.Scheme = target.Scheme
@@ -144,7 +169,7 @@ func newProxy(target *url.URL, modelMap map[string]string, filterTextSnapshot bo
 		req.URL.RawPath = ""
 	}
 
-	proxy.Transport = &loggingTransport{modelMap: modelMap, filterTextSnapshot: filterTextSnapshot, verbose: verbose}
+	proxy.Transport = &loggingTransport{modelMap: modelMap, filterTextSnapshot: filterTextSnapshot, verbose: verbose, fullLogger: fullLogger}
 
 	return proxy
 }
@@ -162,6 +187,7 @@ func joinProxyPath(targetPath, requestPath string) string {
 type loggingTransport struct {
 	modelMap           map[string]string
 	filterTextSnapshot bool
+	fullLogger         *log.Logger
 	verbose            bool
 	Transport          http.RoundTripper
 }
@@ -174,18 +200,20 @@ func (c *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		var err error
 		body, err = io.ReadAll(req.Body)
 		if err != nil {
-			log.Printf("Error reading request body for logging: %v", err)
+			c.logf("Error reading request body for logging: %v", err)
 			return c.transport().RoundTrip(req)
 		}
 	}
 	req.Body = io.NopCloser(bytes.NewBuffer(body))
 
-	log.Printf("Request: %s %s", req.Method, req.URL.String())
+	c.logf("Request: %s %s", req.Method, req.URL.String())
 	if c.verbose {
 		for k, v := range req.Header {
-			log.Printf("Header: %s: %s", k, redactHeaderValue(k, v))
+			c.logf("Header: %s: %s", k, redactHeaderValue(k, v))
 		}
-		log.Printf("Body: %s", string(body))
+		c.logf("Body: %s", string(body))
+	} else if c.fullLogger != nil {
+		c.fullLogf("Body: %s", string(body))
 	}
 
 	// Store the original model from request for response processing
@@ -214,30 +242,43 @@ func (c *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 
 	duration := time.Since(start)
-	log.Printf("Response: %s, ContentLength: %d, Duration: %s", resp.Status, resp.ContentLength, duration)
+	c.logf("Response: %s, ContentLength: %d, Duration: %s", resp.Status, resp.ContentLength, duration)
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		contentType := resp.Header.Get("Content-Type")
 		if c.filterTextSnapshot && isContentType(contentType, "text/event-stream") {
 			respBody, err := io.ReadAll(resp.Body)
 			if err != nil {
-				log.Printf("Error reading streaming response body: %v", err)
+				c.logf("Error reading streaming response body: %v", err)
 				return resp, nil
 			}
 
+			c.fullLogf("Streaming Response body: %s", string(respBody))
 			replaceBody(resp, fixStreamingResponse(respBody))
 		}
 	} else if resp.StatusCode >= 300 {
 		// log error response body
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			log.Printf("Error reading response body: %v", err)
+			c.logf("Error reading response body: %v", err)
 			return nil, err
 		}
-		log.Printf("Error Response body: %s", string(body))
+		c.logf("Error Response body: %s", string(body))
 		replaceBody(resp, body)
 	}
 	return resp, nil
+}
+
+func (c *loggingTransport) logf(format string, args ...any) {
+	log.Printf(format, args...)
+	c.fullLogf(format, args...)
+}
+
+func (c *loggingTransport) fullLogf(format string, args ...any) {
+	if c.fullLogger == nil {
+		return
+	}
+	c.fullLogger.Printf(format, args...)
 }
 
 func redactHeaderValue(key string, values []string) string {

@@ -25,7 +25,7 @@ type usageRecord struct {
 	RequestID        string    `json:"request_id,omitempty"`
 }
 
-func StartAPIProxy(baseUrl string, modelMappings []string, port string, verbose bool) error {
+func StartAPIProxy(baseUrl string, modelMappings []string, port string, verbose bool, logFile string) error {
 	if baseUrl == "" {
 		baseUrl = "https://api.openai.com"
 	}
@@ -43,9 +43,18 @@ func StartAPIProxy(baseUrl string, modelMappings []string, port string, verbose 
 		return fmt.Errorf("invalid --base-url: %w", err)
 	}
 
+	fullLogger, closeFullLogger, err := openAppendLog(logFile)
+	if err != nil {
+		return err
+	}
+	if closeFullLogger != nil {
+		defer closeFullLogger.Close()
+	}
+
 	proxy := newProxy(target, modelMap, verbose)
 	if lt, ok := proxy.Transport.(*loggingTransport); ok {
 		lt.usageLogFile = usageLogFile
+		lt.fullLogger = fullLogger
 	}
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -56,6 +65,9 @@ func StartAPIProxy(baseUrl string, modelMappings []string, port string, verbose 
 	endpoint := fmt.Sprintf("http://%s/v1", addr)
 	log.Printf("OpenAI proxy running at %s", endpoint)
 	log.Printf("Usage log: %s", usageLogFile)
+	if logFile != "" {
+		log.Printf("Full proxy log: %s", logFile)
+	}
 	fmt.Printf("\nTo use with opencode, configure opencode.json:\n")
 	fmt.Printf("  \"provider\": {\n")
 	fmt.Printf("    \"openai\": {\n")
@@ -166,6 +178,17 @@ func parseModelMap(modelMappings []string) (map[string]string, error) {
 	return modelMap, nil
 }
 
+func openAppendLog(logFile string) (*log.Logger, io.Closer, error) {
+	if logFile == "" {
+		return nil, nil, nil
+	}
+	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open --log file: %w", err)
+	}
+	return log.New(f, log.Prefix(), log.Flags()), f, nil
+}
+
 func newProxy(target *url.URL, modelMap map[string]string, verbose bool) *httputil.ReverseProxy {
 	return newProxyWithOptions(target, modelMap, verbose, proxyOptions{})
 }
@@ -179,6 +202,9 @@ func newProxyWithOptions(target *url.URL, modelMap map[string]string, verbose bo
 
 		req.URL.Path = rewriteProxyPath(target.Path, opts.stripPathPrefix, req.URL.Path)
 		req.URL.RawPath = ""
+		if opts.disableWebSocketCompression && isWebSocketRequest(req.Header) {
+			req.Header.Del("Sec-WebSocket-Extensions")
+		}
 	}
 
 	proxy.Transport = &loggingTransport{modelMap: modelMap, verbose: verbose}
@@ -187,10 +213,12 @@ func newProxyWithOptions(target *url.URL, modelMap map[string]string, verbose bo
 }
 
 type loggingTransport struct {
-	modelMap     map[string]string
-	usageLogFile string
-	verbose      bool
-	Transport    http.RoundTripper
+	modelMap             map[string]string
+	usageLogFile         string
+	fullLogger           *log.Logger
+	logWebSocketMessages bool
+	verbose              bool
+	Transport            http.RoundTripper
 }
 
 func (c *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -201,18 +229,20 @@ func (c *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		var err error
 		body, err = io.ReadAll(req.Body)
 		if err != nil {
-			log.Printf("Error reading request body for logging: %v", err)
+			c.logf("Error reading request body for logging: %v", err)
 			return c.transport().RoundTrip(req)
 		}
 	}
 	req.Body = io.NopCloser(bytes.NewBuffer(body))
 
-	log.Printf("Request: %s %s", req.Method, req.URL.String())
+	c.logf("Request: %s %s", req.Method, req.URL.String())
 	if c.verbose {
 		for k, v := range req.Header {
-			log.Printf("Header: %s: %s", k, redactHeaderValue(k, v))
+			c.logf("Header: %s: %s", k, redactHeaderValue(k, v))
 		}
-		log.Printf("Body: %s", string(body))
+		c.logf("Body: %s", string(body))
+	} else if c.fullLogger != nil {
+		c.fullLogf("Body: %s", string(body))
 	}
 
 	contentType := req.Header.Get("Content-Type")
@@ -238,17 +268,31 @@ func (c *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 
 	duration := time.Since(start)
-	log.Printf("Response: %s, ContentLength: %d, Duration: %s", resp.Status, resp.ContentLength, duration)
+	c.logf("Response: %s, ContentLength: %d, Duration: %s", resp.Status, resp.ContentLength, duration)
+
+	if c.logWebSocketMessages && resp.StatusCode == http.StatusSwitchingProtocols && isWebSocketUpgrade(req.Header, resp.Header) {
+		var fullLogf func(format string, args ...any)
+		if c.fullLogger != nil {
+			fullLogf = c.fullLogf
+		}
+		if body, ok := newWebSocketLoggingReadCloser(resp.Body, fullLogf); ok {
+			resp.Body = body
+			c.logf("WebSocket logging enabled: %s", req.URL.String())
+		} else {
+			c.logf("WebSocket logging unavailable: upgraded response body is not writable")
+		}
+	}
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		contentType := resp.Header.Get("Content-Type")
 		if isContentType(contentType, "text/event-stream") {
 			respBody, err := io.ReadAll(resp.Body)
 			if err != nil {
-				log.Printf("Error reading streaming response body: %v", err)
+				c.logf("Error reading streaming response body: %v", err)
 				return resp, nil
 			}
 
+			c.fullLogf("Streaming Response body: %s", string(respBody))
 			if c.usageLogFile != "" {
 				extractStreamingUsage(c.usageLogFile, respBody)
 			}
@@ -256,22 +300,35 @@ func (c *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		} else if c.usageLogFile != "" {
 			respBody, err := io.ReadAll(resp.Body)
 			if err != nil {
-				log.Printf("Error reading response body: %v", err)
+				c.logf("Error reading response body: %v", err)
 				return resp, nil
 			}
+			c.fullLogf("Response body: %s", string(respBody))
 			extractUsage(c.usageLogFile, respBody)
 			replaceBody(resp, respBody)
 		}
 	} else if resp.StatusCode >= 300 {
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			log.Printf("Error reading response body: %v", err)
+			c.logf("Error reading response body: %v", err)
 			return nil, err
 		}
-		log.Printf("Error Response body: %s", string(body))
+		c.logf("Error Response body: %s", string(body))
 		replaceBody(resp, body)
 	}
 	return resp, nil
+}
+
+func (c *loggingTransport) logf(format string, args ...any) {
+	log.Printf(format, args...)
+	c.fullLogf(format, args...)
+}
+
+func (c *loggingTransport) fullLogf(format string, args ...any) {
+	if c.fullLogger == nil {
+		return
+	}
+	c.fullLogger.Printf(format, args...)
 }
 
 func redactHeaderValue(key string, values []string) string {
