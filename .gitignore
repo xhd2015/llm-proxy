@@ -6,3 +6,6 @@
 *.bin
 *.a
 *.exe
+
+# the binary
+/llm-proxy

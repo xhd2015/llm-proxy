@@ -64,3 +64,31 @@ Result:
 ```
 I'm opencode, an interactive CLI tool that helps with software engineering tasks. I can help you write code, debug issues, run commands, search through codebases, and manage development workflows.
 ```
+
+# Codex ChatGPT/OAuth proxy
+
+Use `--codex` when Codex is signed in with ChatGPT/OAuth and you want to route Codex traffic through llm-proxy:
+
+```sh
+llm-proxy --codex --port 8891
+```
+
+Configure Codex with the built-in OpenAI provider:
+
+```toml
+model_provider = "openai"
+openai_base_url = "http://localhost:8891/v1"
+```
+
+Or with a custom provider:
+
+```toml
+model_provider = "llm-proxy"
+
+[model_providers.llm-proxy]
+name = "LLM Proxy"
+base_url = "http://localhost:8891/v1"
+requires_openai_auth = true
+wire_api = "responses"
+supports_websockets = true
+```

@@ -16,6 +16,7 @@ import (
 	_ "embed"
 
 	"github.com/xhd2015/less-gen/flags"
+	openai "github.com/xhd2015/llm-proxy/open_ai"
 )
 
 const help = `
@@ -29,8 +30,11 @@ Options:
   --port PORT                      port to listen on (default: 8080)
   --filter-text-snapshot           filter text snapshot in streaming response: 
                                    e.g. {"type":"text","text":" tool...", "snapshot":"A tool..."}
-								   a workaround for sst/opencode
+							       a workaround for sst/opencode
   -v,--verbose                     show verbose info  
+  --open-ai                        start a local proxy to OpenAI with usage tracking
+  --codex                          start a local proxy to Codex's ChatGPT OAuth backend
+  --usages                         show usage summary from the usage log
 
 Examples:
    llm-proxy --base-url http://localhost:8081 --model model-alias=actual-model
@@ -54,6 +58,9 @@ func Handle(args []string) error {
 		}
 	}
 	var verbose bool
+	var openAI bool
+	var codex bool
+	var showUsages bool
 	var baseUrl string
 	var modelMappings []string
 	var port string
@@ -63,13 +70,28 @@ func Handle(args []string) error {
 		String("--port", &port).
 		Bool("--filter-text-snapshot", &filterTextSnapshot).
 		Bool("-v,--verbose", &verbose).
+		Bool("--open-ai", &openAI).
+		Bool("--codex", &codex).
+		Bool("--usages", &showUsages).
 		Help("-h,--help", help).
 		Parse(args)
 	if err != nil {
 		return err
 	}
+	if openAI && codex {
+		return fmt.Errorf("--open-ai and --codex cannot be used together")
+	}
+	if showUsages {
+		return openai.HandleUsages(args)
+	}
 	if len(args) > 0 {
 		return fmt.Errorf("unrecognized extra args: %s", strings.Join(args, " "))
+	}
+	if openAI {
+		return openai.StartAPIProxy(baseUrl, modelMappings, port, verbose)
+	}
+	if codex {
+		return openai.StartCodexProxy(baseUrl, modelMappings, port, verbose)
 	}
 	if baseUrl == "" {
 		return fmt.Errorf("missing --base-url")
@@ -78,13 +100,9 @@ func Handle(args []string) error {
 		port = "8080"
 	}
 
-	modelMap := make(map[string]string)
-	for _, m := range modelMappings {
-		parts := strings.SplitN(m, "=", 2)
-		if len(parts) != 2 {
-			return fmt.Errorf("invalid model mapping: %s", m)
-		}
-		modelMap[parts[0]] = parts[1]
+	modelMap, err := parseModelMap(modelMappings)
+	if err != nil {
+		return err
 	}
 
 	target, err := url.Parse(baseUrl)
@@ -92,7 +110,7 @@ func Handle(args []string) error {
 		return fmt.Errorf("invalid --base-url: %w", err)
 	}
 
-	proxy := newProxy(target, modelMap, filterTextSnapshot)
+	proxy := newProxy(target, modelMap, filterTextSnapshot, verbose)
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		proxy.ServeHTTP(w, r)
@@ -103,43 +121,72 @@ func Handle(args []string) error {
 	return http.ListenAndServe(addr, nil)
 }
 
-func newProxy(target *url.URL, modelMap map[string]string, filterTextSnapshot bool) *httputil.ReverseProxy {
+func parseModelMap(modelMappings []string) (map[string]string, error) {
+	modelMap := make(map[string]string)
+	for _, m := range modelMappings {
+		parts := strings.SplitN(m, "=", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid model mapping: %s", m)
+		}
+		modelMap[parts[0]] = parts[1]
+	}
+	return modelMap, nil
+}
+
+func newProxy(target *url.URL, modelMap map[string]string, filterTextSnapshot bool, verbose bool) *httputil.ReverseProxy {
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.Director = func(req *http.Request) {
 		req.URL.Scheme = target.Scheme
 		req.URL.Host = target.Host
 		req.Host = target.Host
 
-		req.URL.Path = target.Path + req.URL.Path
+		req.URL.Path = joinProxyPath(target.Path, req.URL.Path)
+		req.URL.RawPath = ""
 	}
 
-	proxy.Transport = &loggingTransport{modelMap: modelMap, filterTextSnapshot: filterTextSnapshot}
+	proxy.Transport = &loggingTransport{modelMap: modelMap, filterTextSnapshot: filterTextSnapshot, verbose: verbose}
 
 	return proxy
+}
+
+func joinProxyPath(targetPath, requestPath string) string {
+	if requestPath == "" {
+		requestPath = "/"
+	}
+	if targetPath == "" || targetPath == "/" {
+		return requestPath
+	}
+	return strings.TrimRight(targetPath, "/") + "/" + strings.TrimLeft(requestPath, "/")
 }
 
 type loggingTransport struct {
 	modelMap           map[string]string
 	filterTextSnapshot bool
+	verbose            bool
 	Transport          http.RoundTripper
 }
 
 func (c *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	start := time.Now()
 
-	body, err := io.ReadAll(req.Body)
-	if err != nil {
-		log.Printf("Error reading request body for logging: %v", err)
-		return c.transport().RoundTrip(req)
+	var body []byte
+	if req.Body != nil {
+		var err error
+		body, err = io.ReadAll(req.Body)
+		if err != nil {
+			log.Printf("Error reading request body for logging: %v", err)
+			return c.transport().RoundTrip(req)
+		}
 	}
 	req.Body = io.NopCloser(bytes.NewBuffer(body))
 
 	log.Printf("Request: %s %s", req.Method, req.URL.String())
-	for k, v := range req.Header {
-		log.Printf("Header: %s: %s", k, strings.Join(v, ","))
+	if c.verbose {
+		for k, v := range req.Header {
+			log.Printf("Header: %s: %s", k, redactHeaderValue(k, v))
+		}
+		log.Printf("Body: %s", string(body))
 	}
-	// body
-	log.Printf("Body: %s", string(body))
 
 	// Store the original model from request for response processing
 	// var originalModel string
@@ -171,22 +218,15 @@ func (c *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		contentType := resp.Header.Get("Content-Type")
-		if c.filterTextSnapshot {
-			if isContentType(contentType, "text/event-stream") {
-				// Handle streaming responses (SSE)
-				log.Printf("Processing streaming response for Anthropic model")
-				respBody, err := io.ReadAll(resp.Body)
-				if err != nil {
-					log.Printf("Error reading streaming response body: %v", err)
-					return resp, nil
-				}
-
-				// Fix citations in streaming response
-				modifiedBody := fixStreamingResponse(respBody)
-				replaceBody(resp, modifiedBody)
+		if c.filterTextSnapshot && isContentType(contentType, "text/event-stream") {
+			respBody, err := io.ReadAll(resp.Body)
+			if err != nil {
+				log.Printf("Error reading streaming response body: %v", err)
+				return resp, nil
 			}
-		}
 
+			replaceBody(resp, fixStreamingResponse(respBody))
+		}
 	} else if resp.StatusCode >= 300 {
 		// log error response body
 		body, err := io.ReadAll(resp.Body)
@@ -198,6 +238,18 @@ func (c *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		replaceBody(resp, body)
 	}
 	return resp, nil
+}
+
+func redactHeaderValue(key string, values []string) string {
+	switch strings.ToLower(key) {
+	case "authorization", "cookie", "set-cookie":
+		if len(values) == 0 {
+			return ""
+		}
+		return "<redacted>"
+	default:
+		return strings.Join(values, ",")
+	}
 }
 
 func replaceBody(resp *http.Response, body []byte) {
