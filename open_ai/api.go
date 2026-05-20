@@ -12,6 +12,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	logutil "github.com/xhd2015/llm-proxy/log"
 )
 
 const usageLogFile = "usages.log"
@@ -43,7 +45,7 @@ func StartAPIProxy(baseUrl string, modelMappings []string, port string, verbose 
 		return fmt.Errorf("invalid --base-url: %w", err)
 	}
 
-	fullLogger, closeFullLogger, err := openAppendLog(logFile)
+	fullLogger, closeFullLogger, err := logutil.OpenAppend(logFile)
 	if err != nil {
 		return err
 	}
@@ -178,17 +180,6 @@ func parseModelMap(modelMappings []string) (map[string]string, error) {
 	return modelMap, nil
 }
 
-func openAppendLog(logFile string) (*log.Logger, io.Closer, error) {
-	if logFile == "" {
-		return nil, nil, nil
-	}
-	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return nil, nil, fmt.Errorf("open --log file: %w", err)
-	}
-	return log.New(f, log.Prefix(), log.Flags()), f, nil
-}
-
 func newProxy(target *url.URL, modelMap map[string]string, verbose bool) *httputil.ReverseProxy {
 	return newProxyWithOptions(target, modelMap, verbose, proxyOptions{})
 }
@@ -215,7 +206,7 @@ func newProxyWithOptions(target *url.URL, modelMap map[string]string, verbose bo
 type loggingTransport struct {
 	modelMap             map[string]string
 	usageLogFile         string
-	fullLogger           *log.Logger
+	fullLogger           *logutil.Logger
 	logWebSocketMessages bool
 	verbose              bool
 	Transport            http.RoundTripper
@@ -237,9 +228,7 @@ func (c *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	c.logf("Request: %s %s", req.Method, req.URL.String())
 	if c.verbose {
-		for k, v := range req.Header {
-			c.logf("Header: %s: %s", k, redactHeaderValue(k, v))
-		}
+		logutil.LogHeaders(req.Header, c.logf)
 		c.logf("Body: %s", string(body))
 	} else if c.fullLogger != nil {
 		c.fullLogf("Body: %s", string(body))
@@ -329,18 +318,6 @@ func (c *loggingTransport) fullLogf(format string, args ...any) {
 		return
 	}
 	c.fullLogger.Printf(format, args...)
-}
-
-func redactHeaderValue(key string, values []string) string {
-	switch strings.ToLower(key) {
-	case "authorization", "cookie", "set-cookie":
-		if len(values) == 0 {
-			return ""
-		}
-		return "<redacted>"
-	default:
-		return strings.Join(values, ",")
-	}
 }
 
 func replaceBody(resp *http.Response, body []byte) {

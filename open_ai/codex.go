@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"unicode/utf8"
+
+	logutil "github.com/xhd2015/llm-proxy/log"
 )
 
 const (
@@ -38,7 +40,7 @@ func StartCodexProxy(baseUrl string, modelMappings []string, port string, verbos
 		return fmt.Errorf("invalid --base-url: %w", err)
 	}
 
-	fullLogger, closeFullLogger, err := openAppendLog(logFile)
+	fullLogger, closeFullLogger, err := logutil.OpenAppend(logFile)
 	if err != nil {
 		return err
 	}
