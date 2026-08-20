@@ -3,15 +3,16 @@
 Coverage-backfill doctests for `transformCodexRequest(data map[string]interface{},
 logf func(format string, args ...any))` (`open_ai/codex.go`). It adapts a
 standard OpenAI Responses API request map for the Codex ChatGPT OAuth backend,
-which rejects system role messages (content moved to `instructions`) and
-requires `store=false` / `stream=true`.
+which rejects system role messages (content moved to `instructions`), rejects
+the `temperature` parameter (stripped), and requires `store=false` /
+`stream=true`.
 
 The function is unexported; the doctest harness reaches it via the exported seam
 `openai.TransformCodexRequest` (`open_ai/doctest_seam.go`, pure delegation).
 
 ## Version
 
-0.0.2
+0.0.3
 
 # DSN (Domain Specific Notion)
 
@@ -20,8 +21,8 @@ The function is unexported; the doctest harness reaches it via the exported seam
 - **Request map** — a decoded OpenAI Responses API request body; carries
   `input` (message array), optional `instructions`, and flag fields.
 - **transformCodexRequest** — mutates the map in place: pulls system-role
-  messages out of `input`, joins their text into `instructions`, then forces
-  `store=false` and `stream=true`.
+  messages out of `input`, joins their text into `instructions`, strips
+  `temperature`, then forces `store=false` and `stream=true`.
 - **logf** — a sink for a single summary line when system messages were moved.
 - **Codex backend** — downstream OAuth target that rejects system messages and
   requires the two flag values.
@@ -48,7 +49,8 @@ codex-request-transform
 │   ├── system-array-content              # text+input_text parts -> instructions
 │   ├── multiple-system-messages          # joined with \n\n
 │   ├── store-set-false                   # store forced false (overwrites true)
-│   └── stream-set-true                   # stream forced true (overwrites false)
+│   ├── stream-set-true                   # stream forced true (overwrites false)
+│   └── temperature-stripped              # temperature deleted (overwrites 0)
 ```
 
 ### Parameter significance (high → low)
@@ -69,6 +71,7 @@ codex-request-transform
 | `with-input/multiple-system-messages` | two system messages → `instructions="first\n\nsecond"` |
 | `with-input/store-set-false` | `store:true` overwritten to `false` |
 | `with-input/stream-set-true` | `stream:false` overwritten to `true` |
+| `with-input/temperature-stripped` | `temperature:0` deleted by transform |
 
 ## How to Run
 

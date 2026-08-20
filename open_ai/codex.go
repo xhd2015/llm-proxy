@@ -143,6 +143,7 @@ func codexAuthPath() string {
 // for the Codex ChatGPT OAuth backend, which:
 //   - rejects system role messages (move content to instructions)
 //   - rejects input items with empty-string id fields (strip them)
+//   - rejects the temperature parameter (strip it)
 //   - requires store=false
 //   - requires stream=true
 //
@@ -214,6 +215,12 @@ func transformCodexRequest(data map[string]interface{}, logf func(format string,
 		logf("Codex transform: moved %d system message(s) to instructions", len(instructions))
 	}
 	data["input"] = kept
+	// The Codex backend rejects the "temperature" parameter (400 Bad
+	// Request, "Unsupported parameter: temperature"). This is the only
+	// known caller that sends it — Grok's compaction system sets
+	// temperature=0 for deterministic summarization. Regular inference
+	// requests never include it, so the strip is a no-op for them.
+	delete(data, "temperature")
 	data["store"] = false
 	data["stream"] = true
 }
