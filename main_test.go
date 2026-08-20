@@ -162,3 +162,33 @@ func TestJoinProxyPath(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeStreamingResponseAnthropicUsage(t *testing.T) {
+	body := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"cache_creation_input_tokens\":null,\"cache_read_input_tokens\":null}}}\n\n")
+
+	got := normalizeStreamingResponse(body, false, true)
+	if bytes.Equal(got, body) {
+		t.Fatal("expected stream body to be normalized")
+	}
+	var event struct {
+		Message struct {
+			Usage map[string]interface{} `json:"usage"`
+		} `json:"message"`
+	}
+	line := strings.Split(strings.TrimSpace(string(got)), "\n")[1]
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"} {
+		if event.Message.Usage[key] == nil {
+			t.Fatalf("usage %q remained null", key)
+		}
+	}
+}
+
+func TestNormalizeStreamingResponseLeavesOtherEventsUntouched(t *testing.T) {
+	body := []byte("data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hello\"}}\n\n")
+	if got := normalizeStreamingResponse(body, false, true); !bytes.Equal(got, body) {
+		t.Fatalf("unrelated event changed: %s", got)
+	}
+}

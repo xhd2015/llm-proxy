@@ -32,6 +32,8 @@ Options:
   --filter-text-snapshot           filter text snapshot in streaming response: 
                                    e.g. {"type":"text","text":" tool...", "snapshot":"A tool..."}
 							       a workaround for sst/opencode
+  --normalize-anthropic-usage      replace null Anthropic stream usage token counters with 0;
+                                   a compatibility workaround for strict clients such as Grok Build
   -v,--verbose                     show verbose info  
   --log FILE                       append full proxy logs to FILE while keeping terminal logs brief
   --open-ai                        start a local proxy to OpenAI with usage tracking
@@ -68,11 +70,13 @@ func Handle(args []string) error {
 	var port string
 	var logFile string
 	var filterTextSnapshot bool
+	var normalizeAnthropicUsage bool
 	args, err := flags.String("--base-url", &baseUrl).
 		StringSlice("--model", &modelMappings).
 		String("--port", &port).
 		String("--log", &logFile).
 		Bool("--filter-text-snapshot", &filterTextSnapshot).
+		Bool("--normalize-anthropic-usage", &normalizeAnthropicUsage).
 		Bool("-v,--verbose", &verbose).
 		Bool("--open-ai", &openAI).
 		Bool("--codex", &codex).
@@ -122,7 +126,7 @@ func Handle(args []string) error {
 		defer closeFullLogger.Close()
 	}
 
-	proxy := newProxy(target, modelMap, filterTextSnapshot, verbose, fullLogger)
+	proxy := newProxy(target, modelMap, filterTextSnapshot, normalizeAnthropicUsage, verbose, fullLogger)
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		proxy.ServeHTTP(w, r)
@@ -148,7 +152,7 @@ func parseModelMap(modelMappings []string) (map[string]string, error) {
 	return modelMap, nil
 }
 
-func newProxy(target *url.URL, modelMap map[string]string, filterTextSnapshot bool, verbose bool, fullLogger *logutil.Logger) *httputil.ReverseProxy {
+func newProxy(target *url.URL, modelMap map[string]string, filterTextSnapshot bool, normalizeAnthropicUsage bool, verbose bool, fullLogger *logutil.Logger) *httputil.ReverseProxy {
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.Director = func(req *http.Request) {
 		req.URL.Scheme = target.Scheme
@@ -159,7 +163,7 @@ func newProxy(target *url.URL, modelMap map[string]string, filterTextSnapshot bo
 		req.URL.RawPath = ""
 	}
 
-	proxy.Transport = &loggingTransport{modelMap: modelMap, filterTextSnapshot: filterTextSnapshot, verbose: verbose, fullLogger: fullLogger}
+	proxy.Transport = &loggingTransport{modelMap: modelMap, filterTextSnapshot: filterTextSnapshot, normalizeAnthropicUsage: normalizeAnthropicUsage, verbose: verbose, fullLogger: fullLogger}
 
 	return proxy
 }
@@ -175,11 +179,12 @@ func joinProxyPath(targetPath, requestPath string) string {
 }
 
 type loggingTransport struct {
-	modelMap           map[string]string
-	filterTextSnapshot bool
-	fullLogger         *logutil.Logger
-	verbose            bool
-	Transport          http.RoundTripper
+	modelMap                map[string]string
+	filterTextSnapshot      bool
+	normalizeAnthropicUsage bool
+	fullLogger              *logutil.Logger
+	verbose                 bool
+	Transport               http.RoundTripper
 }
 
 func (c *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -234,7 +239,7 @@ func (c *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		contentType := resp.Header.Get("Content-Type")
-		if c.filterTextSnapshot && isContentType(contentType, "text/event-stream") {
+		if (c.filterTextSnapshot || c.normalizeAnthropicUsage) && isContentType(contentType, "text/event-stream") {
 			respBody, err := io.ReadAll(resp.Body)
 			if err != nil {
 				c.logf("Error reading streaming response body: %v", err)
@@ -242,7 +247,7 @@ func (c *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 			}
 
 			c.fullLogf("Streaming Response body: %s", string(respBody))
-			replaceBody(resp, fixStreamingResponse(respBody))
+			replaceBody(resp, normalizeStreamingResponse(respBody, c.filterTextSnapshot, c.normalizeAnthropicUsage))
 		}
 	} else if resp.StatusCode >= 300 {
 		// log error response body
@@ -295,6 +300,10 @@ func (t *loggingTransport) transport() http.RoundTripper {
 
 // fixStreamingResponse fixes citations in streaming SSE responses
 func fixStreamingResponse(body []byte) []byte {
+	return normalizeStreamingResponse(body, true, false)
+}
+
+func normalizeStreamingResponse(body []byte, filterTextSnapshot bool, normalizeAnthropicUsage bool) []byte {
 	lines := strings.Split(string(body), "\n")
 	modified := false
 
@@ -329,10 +338,17 @@ func fixStreamingResponse(body []byte) []byte {
 			continue
 		}
 
-		// Fix citations in streaming data
-		if skipTextContainingSnapshot(data) {
+		if filterTextSnapshot && skipTextContainingSnapshot(data) {
 			modified = true
 			continue
+		}
+		if normalizeAnthropicUsage && normalizeAnthropicUsageCounters(data) {
+			encoded, err := json.Marshal(data)
+			if err == nil {
+				modified = true
+				newLines = append(newLines, "data: "+string(encoded))
+				continue
+			}
 		}
 		newLines = append(newLines, line)
 	}
@@ -341,6 +357,29 @@ func fixStreamingResponse(body []byte) []byte {
 		return []byte(strings.Join(newLines, "\n"))
 	}
 	return body
+}
+
+// normalizeAnthropicUsageCounters makes Anthropic-compatible streams safe for
+// clients whose deserializers require the documented usage counters to be
+// unsigned integers rather than null.
+func normalizeAnthropicUsageCounters(data map[string]interface{}) bool {
+	message, ok := data["message"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	usage, ok := message["usage"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+
+	changed := false
+	for _, key := range []string{"input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"} {
+		if usage[key] == nil {
+			usage[key] = 0
+			changed = true
+		}
+	}
+	return changed
 }
 
 // skipTextContainingSnapshot fixes citations in streaming data objects
