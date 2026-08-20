@@ -53,14 +53,12 @@ func StartCodexProxy(baseUrl string, modelMappings []string, port string, verbos
 	proxy := newProxyWithOptions(target, modelMap, verbose, proxyOptions{
 		stripPathPrefix:             "/v1",
 		disableWebSocketCompression: true,
+		usageLogFile:                usageLogFile,
+		fullLogger:                  fullLogger,
+		logWebSocketMessages:        true,
+		codexTransform:              true,
+		codexAuthFile:               codexAuthPath(),
 	})
-	if lt, ok := proxy.Transport.(*loggingTransport); ok {
-		lt.usageLogFile = usageLogFile
-		lt.fullLogger = fullLogger
-		lt.logWebSocketMessages = true
-		lt.codexTransform = true
-		lt.codexAuthFile = codexAuthPath()
-	}
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		proxy.ServeHTTP(w, r)
@@ -269,29 +267,6 @@ func parseSSEData(line string) (string, bool) {
 		return "", false
 	}
 	return strings.TrimPrefix(line, "data: "), true
-}
-
-type proxyOptions struct {
-	stripPathPrefix             string
-	disableWebSocketCompression bool
-}
-
-func rewriteProxyPath(targetPath, stripPrefix, requestPath string) string {
-	if requestPath == "" {
-		requestPath = "/"
-	}
-	if stripPrefix != "" {
-		prefix := "/" + strings.Trim(stripPrefix, "/")
-		if requestPath == prefix {
-			requestPath = "/"
-		} else if strings.HasPrefix(requestPath, prefix+"/") {
-			requestPath = strings.TrimPrefix(requestPath, prefix)
-		}
-	}
-	if targetPath == "" || targetPath == "/" {
-		return requestPath
-	}
-	return strings.TrimRight(targetPath, "/") + "/" + strings.TrimLeft(requestPath, "/")
 }
 
 func isWebSocketUpgrade(reqHeader http.Header, respHeader http.Header) bool {

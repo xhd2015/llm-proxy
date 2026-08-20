@@ -52,6 +52,13 @@ func TestRewriteProxyPath(t *testing.T) {
 			requestPath: "/v1/models",
 			expected:    "/models",
 		},
+		{
+			name:        "handles root target without stripping",
+			targetPath:  "/",
+			stripPrefix: "",
+			requestPath: "/v1/models",
+			expected:    "/v1/models",
+		},
 	}
 
 	for _, tt := range tests {

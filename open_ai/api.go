@@ -1,22 +1,46 @@
 package openai
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/xhd2015/less-gen/flags"
 	logutil "github.com/xhd2015/llm-proxy/log"
 )
 
 const usageLogFile = "usages.log"
+
+const help = `
+llm-proxy help to proxy llm requests
+
+Usage: llm-proxy [OPTIONS]
+
+Options:
+  --base-url URL                   base url to proxy
+  --model FROM=TO                  remapping models, can be repeated
+  --port PORT                      port to listen on (default: 8080)
+  --filter-text-snapshot           filter text snapshot in streaming response:
+                                   e.g. {"type":"text","text":" tool...", "snapshot":"A tool..."}
+							       a workaround for sst/opencode
+  --normalize-anthropic-usage      replace null Anthropic stream usage token counters with 0;
+                                   a compatibility workaround for strict clients such as Grok Build
+  -v,--verbose                     show verbose info
+  --log FILE                       append full proxy logs to FILE while keeping terminal logs brief
+  --open-ai                        start a local proxy to OpenAI with usage tracking
+  --codex                          start a local proxy to Codex's ChatGPT OAuth backend
+  --usages                         show usage summary from the usage log
+
+Examples:
+   llm-proxy --base-url http://localhost:8081 --model model-alias=actual-model
+
+   llm-proxy doc
+`
 
 type usageRecord struct {
 	Time             time.Time `json:"time"`
@@ -25,6 +49,99 @@ type usageRecord struct {
 	CompletionTokens int       `json:"completion_tokens"`
 	TotalTokens      int       `json:"total_tokens"`
 	RequestID        string    `json:"request_id,omitempty"`
+}
+
+// Handle dispatches a llm-proxy CLI invocation to the doc subcommand, the
+// usage summary, the OpenAI/Codex proxies, or a generic --base-url proxy.
+func Handle(args []string) error {
+	if len(args) > 0 {
+		arg0 := args[0]
+		switch arg0 {
+		case "doc":
+			return handleDoc(args[1:])
+		}
+	}
+	var verbose bool
+	var openAI bool
+	var codex bool
+	var showUsages bool
+	var baseUrl string
+	var modelMappings []string
+	var port string
+	var logFile string
+	var filterTextSnapshot bool
+	var normalizeAnthropicUsage bool
+	args, err := flags.String("--base-url", &baseUrl).
+		StringSlice("--model", &modelMappings).
+		String("--port", &port).
+		String("--log", &logFile).
+		Bool("--filter-text-snapshot", &filterTextSnapshot).
+		Bool("--normalize-anthropic-usage", &normalizeAnthropicUsage).
+		Bool("-v,--verbose", &verbose).
+		Bool("--open-ai", &openAI).
+		Bool("--codex", &codex).
+		Bool("--usages", &showUsages).
+		Help("-h,--help", help).
+		Parse(args)
+	if err != nil {
+		return err
+	}
+	if openAI && codex {
+		return fmt.Errorf("--open-ai and --codex cannot be used together")
+	}
+	if showUsages {
+		return HandleUsages(args)
+	}
+	if len(args) > 0 {
+		return fmt.Errorf("unrecognized extra args: %s", strings.Join(args, " "))
+	}
+	if openAI {
+		return StartAPIProxy(baseUrl, modelMappings, port, verbose, logFile)
+	}
+	if codex {
+		return StartCodexProxy(baseUrl, modelMappings, port, verbose, logFile)
+	}
+	if baseUrl == "" {
+		return fmt.Errorf("missing --base-url")
+	}
+	if port == "" {
+		port = "8080"
+	}
+
+	modelMap, err := parseModelMap(modelMappings)
+	if err != nil {
+		return err
+	}
+
+	target, err := url.Parse(baseUrl)
+	if err != nil {
+		return fmt.Errorf("invalid --base-url: %w", err)
+	}
+
+	fullLogger, closeFullLogger, err := logutil.OpenAppend(logFile)
+	if err != nil {
+		return err
+	}
+	if closeFullLogger != nil {
+		defer closeFullLogger.Close()
+	}
+
+	proxy := newProxyWithOptions(target, modelMap, verbose, proxyOptions{
+		filterTextSnapshot:      filterTextSnapshot,
+		normalizeAnthropicUsage: normalizeAnthropicUsage,
+		fullLogger:              fullLogger,
+	})
+
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		proxy.ServeHTTP(w, r)
+	})
+
+	addr := ":" + port
+	log.Printf("Starting proxy server on %s", addr)
+	if logFile != "" {
+		log.Printf("Full proxy log: %s", logFile)
+	}
+	return http.ListenAndServe(addr, nil)
 }
 
 func StartAPIProxy(baseUrl string, modelMappings []string, port string, verbose bool, logFile string) error {
@@ -53,11 +170,10 @@ func StartAPIProxy(baseUrl string, modelMappings []string, port string, verbose 
 		defer closeFullLogger.Close()
 	}
 
-	proxy := newProxy(target, modelMap, verbose)
-	if lt, ok := proxy.Transport.(*loggingTransport); ok {
-		lt.usageLogFile = usageLogFile
-		lt.fullLogger = fullLogger
-	}
+	proxy := newProxyWithOptions(target, modelMap, verbose, proxyOptions{
+		usageLogFile: usageLogFile,
+		fullLogger:   fullLogger,
+	})
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		proxy.ServeHTTP(w, r)
@@ -166,214 +282,6 @@ func HandleUsages(args []string) error {
 	}
 
 	return nil
-}
-
-func parseModelMap(modelMappings []string) (map[string]string, error) {
-	modelMap := make(map[string]string)
-	for _, m := range modelMappings {
-		parts := strings.SplitN(m, "=", 2)
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("invalid model mapping: %s", m)
-		}
-		modelMap[parts[0]] = parts[1]
-	}
-	return modelMap, nil
-}
-
-func newProxy(target *url.URL, modelMap map[string]string, verbose bool) *httputil.ReverseProxy {
-	return newProxyWithOptions(target, modelMap, verbose, proxyOptions{})
-}
-
-func newProxyWithOptions(target *url.URL, modelMap map[string]string, verbose bool, opts proxyOptions) *httputil.ReverseProxy {
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.Director = func(req *http.Request) {
-		req.URL.Scheme = target.Scheme
-		req.URL.Host = target.Host
-		req.Host = target.Host
-
-		req.URL.Path = rewriteProxyPath(target.Path, opts.stripPathPrefix, req.URL.Path)
-		req.URL.RawPath = ""
-		if opts.disableWebSocketCompression && isWebSocketRequest(req.Header) {
-			req.Header.Del("Sec-WebSocket-Extensions")
-		}
-	}
-
-	proxy.Transport = &loggingTransport{modelMap: modelMap, verbose: verbose}
-
-	return proxy
-}
-
-type loggingTransport struct {
-	modelMap             map[string]string
-	usageLogFile         string
-	fullLogger           *logutil.Logger
-	logWebSocketMessages bool
-	codexTransform       bool
-	codexAuthFile        string
-	verbose              bool
-	Transport            http.RoundTripper
-}
-
-func (c *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	start := time.Now()
-
-	var body []byte
-	if req.Body != nil {
-		var err error
-		body, err = io.ReadAll(req.Body)
-		if err != nil {
-			c.logf("Error reading request body for logging: %v", err)
-			return c.transport().RoundTrip(req)
-		}
-	}
-	req.Body = io.NopCloser(bytes.NewBuffer(body))
-
-	c.logf("Request: %s %s", req.Method, req.URL.String())
-	if c.verbose {
-		logutil.LogHeaders(req.Header, c.logf)
-		c.logf("Body: %s", string(body))
-	} else if c.fullLogger != nil {
-		c.fullLogf("Body: %s", string(body))
-	}
-
-	contentType := req.Header.Get("Content-Type")
-	if req.Method == "POST" && (contentType == "application/json" || strings.HasPrefix(contentType, "application/json;")) {
-		var data map[string]interface{}
-		if err := json.Unmarshal(body, &data); err == nil {
-			if c.codexTransform {
-				transformCodexRequest(data, c.logf)
-			}
-			if model, ok := data["model"].(string); ok {
-				if newModel, ok := c.modelMap[model]; ok {
-					data["model"] = newModel
-				}
-			}
-			modifiedBody, err := json.Marshal(data)
-			if err == nil {
-				req.Body = io.NopCloser(bytes.NewBuffer(modifiedBody))
-				req.ContentLength = int64(len(modifiedBody))
-			}
-		}
-	}
-
-	// Inject Codex OAuth credentials from ~/.codex/auth.json. When
-	// codexTransform is on the proxy always overrides auth, because the
-	// Codex backend requires a ChatGPT OAuth token — any Bearer token
-	// the client sends (e.g. an xAI session token) would be rejected.
-	if c.codexTransform && c.codexAuthFile != "" {
-		if token, accountID, err := readCodexAuth(c.codexAuthFile); err == nil {
-			req.Header.Set("Authorization", "Bearer "+token)
-			if accountID != "" {
-				req.Header.Set("Chatgpt-Account-Id", accountID)
-			}
-		}
-	}
-
-	resp, err := c.transport().RoundTrip(req)
-	if err != nil {
-		return nil, err
-	}
-
-	duration := time.Since(start)
-	c.logf("Response: %s, ContentLength: %d, Duration: %s", resp.Status, resp.ContentLength, duration)
-
-	if c.logWebSocketMessages && resp.StatusCode == http.StatusSwitchingProtocols && isWebSocketUpgrade(req.Header, resp.Header) {
-		var fullLogf func(format string, args ...any)
-		if c.fullLogger != nil {
-			fullLogf = c.fullLogf
-		}
-		if body, ok := newWebSocketLoggingReadCloser(resp.Body, fullLogf); ok {
-			resp.Body = body
-			c.logf("WebSocket logging enabled: %s", req.URL.String())
-		} else {
-			c.logf("WebSocket logging unavailable: upgraded response body is not writable")
-		}
-	}
-
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		contentType := resp.Header.Get("Content-Type")
-		if isContentType(contentType, "text/event-stream") {
-			respBody, err := io.ReadAll(resp.Body)
-			if err != nil {
-				c.logf("Error reading streaming response body: %v", err)
-				return resp, nil
-			}
-
-			if c.codexTransform {
-				respBody = patchCodexSSEOutput(respBody)
-			}
-			c.fullLogf("Streaming Response body: %s", string(respBody))
-			if c.usageLogFile != "" {
-				extractStreamingUsage(c.usageLogFile, respBody)
-			}
-			replaceBody(resp, respBody)
-		} else if c.usageLogFile != "" {
-			respBody, err := io.ReadAll(resp.Body)
-			if err != nil {
-				c.logf("Error reading response body: %v", err)
-				return resp, nil
-			}
-			if c.codexTransform {
-				respBody = patchCodexSSEOutput(respBody)
-				// The Codex backend returns text/plain but the
-				// body is SSE format. Fix the content type so
-				// clients parse it as an event stream.
-				trimmed := bytes.TrimSpace(respBody)
-				if bytes.HasPrefix(trimmed, []byte("event:")) || bytes.HasPrefix(trimmed, []byte("data:")) {
-					resp.Header.Set("Content-Type", "text/event-stream")
-					extractStreamingUsage(c.usageLogFile, respBody)
-				} else {
-					extractUsage(c.usageLogFile, respBody)
-				}
-			} else {
-				extractUsage(c.usageLogFile, respBody)
-			}
-			c.fullLogf("Response body: %s", string(respBody))
-			replaceBody(resp, respBody)
-		}
-	} else if resp.StatusCode >= 300 {
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			c.logf("Error reading response body: %v", err)
-			return nil, err
-		}
-		c.logf("Error Response body: %s", string(body))
-		replaceBody(resp, body)
-	}
-	return resp, nil
-}
-
-func (c *loggingTransport) logf(format string, args ...any) {
-	log.Printf(format, args...)
-	c.fullLogf(format, args...)
-}
-
-func (c *loggingTransport) fullLogf(format string, args ...any) {
-	if c.fullLogger == nil {
-		return
-	}
-	c.fullLogger.Printf(format, args...)
-}
-
-func replaceBody(resp *http.Response, body []byte) {
-	resp.Body = io.NopCloser(bytes.NewBuffer(body))
-
-	newLen := len(body)
-	resp.ContentLength = int64(newLen)
-
-	resp.Header.Set("Content-Length", fmt.Sprintf("%d", newLen))
-	resp.Header.Del("Transfer-Encoding")
-}
-
-func isContentType(contentType string, expected string) bool {
-	return strings.Contains(contentType, expected) || strings.HasPrefix(contentType, expected+";")
-}
-
-func (t *loggingTransport) transport() http.RoundTripper {
-	if t.Transport != nil {
-		return t.Transport
-	}
-	return http.DefaultTransport
 }
 
 func extractUsage(logFile string, body []byte) {

@@ -1,4 +1,4 @@
-package main
+package openai
 
 import (
 	"bytes"
@@ -11,7 +11,6 @@ import (
 )
 
 // mockRoundTripper is a mock implementation of http.RoundTripper for testing.
-
 type mockRoundTripper struct {
 	t          *testing.T
 	body       []byte
@@ -127,37 +126,6 @@ func TestHandleRejectsOpenAIAndCodex(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), "--open-ai and --codex cannot be used together") {
 				t.Fatalf("unexpected error: %v", err)
-			}
-		})
-	}
-}
-
-func TestJoinProxyPath(t *testing.T) {
-	tests := []struct {
-		name        string
-		targetPath  string
-		requestPath string
-		expected    string
-	}{
-		{
-			name:        "joins default proxy paths",
-			targetPath:  "/backend-api",
-			requestPath: "/v1/responses",
-			expected:    "/backend-api/v1/responses",
-		},
-		{
-			name:        "handles root target path",
-			targetPath:  "/",
-			requestPath: "/v1/models",
-			expected:    "/v1/models",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := joinProxyPath(tt.targetPath, tt.requestPath)
-			if got != tt.expected {
-				t.Fatalf("joinProxyPath() = %q, want %q", got, tt.expected)
 			}
 		})
 	}
