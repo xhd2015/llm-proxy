@@ -278,3 +278,23 @@ func buildWebSocketFrame(fin bool, opcode byte, masked bool, payload []byte) []b
 	}
 	return frame
 }
+
+func TestParseModelMapError(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{name: "no equals separator", input: "no-equals"},
+		{name: "empty mapping", input: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := parseModelMap([]string{tt.input})
+			if err == nil {
+				t.Fatalf("parseModelMap([%q]) expected error, got nil", tt.input)
+			}
+		})
+	}
+}
