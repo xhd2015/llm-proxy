@@ -91,6 +91,8 @@ func StartCodexProxy(baseUrl string, modelMappings []string, port string, verbos
 	fmt.Printf("  api_backend = \"responses\"\n")
 	fmt.Printf("  context_window = 200000\n")
 	fmt.Printf("\n  # Auth is injected automatically from ~/.codex/auth.json.\n")
+	fmt.Printf("\n  # Generate config blocks for all Codex models:\n")
+	fmt.Printf("  llm-proxy codex-models\n")
 	fmt.Printf("\nVerify:\n")
 	fmt.Printf("  # Codex CLI (no config edit needed):\n")
 	fmt.Printf("  codex exec --ephemeral -c 'model_provider=\"openai\"' -c 'openai_base_url=\"%s\"' 'one word of capital of french'\n", endpoint)
@@ -143,7 +145,29 @@ func codexAuthPath() string {
 //   - rejects input items with empty-string id fields (strip them)
 //   - requires store=false
 //   - requires stream=true
+//
+// The model field may carry an optional reasoning effort suffix
+// (e.g. "gpt-5.6-luna:high"); the suffix is parsed and injected as
+// reasoning.effort, and the model is sent upstream without the suffix.
 func transformCodexRequest(data map[string]interface{}, logf func(format string, args ...any)) {
+	// Parse and strip reasoning effort suffix from the model field.
+	if model, ok := data["model"].(string); ok {
+		if idx := strings.LastIndex(model, ":"); idx > 0 {
+			effort := model[idx+1:]
+			if isValidReasoningEffort(effort) {
+				data["model"] = model[:idx]
+				reasoning, _ := data["reasoning"].(map[string]interface{})
+				if reasoning == nil {
+					reasoning = map[string]interface{}{}
+				}
+				if _, exists := reasoning["effort"]; !exists {
+					reasoning["effort"] = effort
+					data["reasoning"] = reasoning
+				}
+			}
+		}
+	}
+
 	input, ok := data["input"].([]interface{})
 	if !ok {
 		return
@@ -192,6 +216,16 @@ func transformCodexRequest(data map[string]interface{}, logf func(format string,
 	data["input"] = kept
 	data["store"] = false
 	data["stream"] = true
+}
+
+// isValidReasoningEffort reports whether s is a recognized reasoning
+// effort level for the Codex backend.
+func isValidReasoningEffort(s string) bool {
+	switch s {
+	case "low", "medium", "high", "xhigh", "max", "ultra":
+		return true
+	}
+	return false
 }
 
 // patchCodexSSEOutput collects output items from SSE

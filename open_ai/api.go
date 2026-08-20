@@ -35,6 +35,7 @@ Options:
   --open-ai                        start a local proxy to OpenAI with usage tracking
   --codex                          start a local proxy to Codex's ChatGPT OAuth backend
   --usages                         show usage summary from the usage log
+  codex-models                    print grok config.toml blocks for all Codex models
 
 Examples:
    llm-proxy --base-url http://localhost:8081 --model model-alias=actual-model
@@ -59,6 +60,8 @@ func Handle(args []string) error {
 		switch arg0 {
 		case "doc":
 			return handleDoc(args[1:])
+		case "codex-models":
+			return handleCodexModels(args[1:])
 		}
 	}
 	var verbose bool
