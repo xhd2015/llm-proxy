@@ -208,6 +208,8 @@ type loggingTransport struct {
 	usageLogFile         string
 	fullLogger           *logutil.Logger
 	logWebSocketMessages bool
+	codexTransform       bool
+	codexAuthFile        string
 	verbose              bool
 	Transport            http.RoundTripper
 }
@@ -238,15 +240,31 @@ func (c *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	if req.Method == "POST" && (contentType == "application/json" || strings.HasPrefix(contentType, "application/json;")) {
 		var data map[string]interface{}
 		if err := json.Unmarshal(body, &data); err == nil {
+			if c.codexTransform {
+				transformCodexRequest(data, c.logf)
+			}
 			if model, ok := data["model"].(string); ok {
 				if newModel, ok := c.modelMap[model]; ok {
 					data["model"] = newModel
-					modifiedBody, err := json.Marshal(data)
-					if err == nil {
-						req.Body = io.NopCloser(bytes.NewBuffer(modifiedBody))
-						req.ContentLength = int64(len(modifiedBody))
-					}
 				}
+			}
+			modifiedBody, err := json.Marshal(data)
+			if err == nil {
+				req.Body = io.NopCloser(bytes.NewBuffer(modifiedBody))
+				req.ContentLength = int64(len(modifiedBody))
+			}
+		}
+	}
+
+	// Inject Codex OAuth credentials from ~/.codex/auth.json. When
+	// codexTransform is on the proxy always overrides auth, because the
+	// Codex backend requires a ChatGPT OAuth token — any Bearer token
+	// the client sends (e.g. an xAI session token) would be rejected.
+	if c.codexTransform && c.codexAuthFile != "" {
+		if token, accountID, err := readCodexAuth(c.codexAuthFile); err == nil {
+			req.Header.Set("Authorization", "Bearer "+token)
+			if accountID != "" {
+				req.Header.Set("Chatgpt-Account-Id", accountID)
 			}
 		}
 	}
@@ -281,6 +299,9 @@ func (c *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 				return resp, nil
 			}
 
+			if c.codexTransform {
+				respBody = patchCodexSSEOutput(respBody)
+			}
 			c.fullLogf("Streaming Response body: %s", string(respBody))
 			if c.usageLogFile != "" {
 				extractStreamingUsage(c.usageLogFile, respBody)
@@ -292,8 +313,22 @@ func (c *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 				c.logf("Error reading response body: %v", err)
 				return resp, nil
 			}
+			if c.codexTransform {
+				respBody = patchCodexSSEOutput(respBody)
+				// The Codex backend returns text/plain but the
+				// body is SSE format. Fix the content type so
+				// clients parse it as an event stream.
+				trimmed := bytes.TrimSpace(respBody)
+				if bytes.HasPrefix(trimmed, []byte("event:")) || bytes.HasPrefix(trimmed, []byte("data:")) {
+					resp.Header.Set("Content-Type", "text/event-stream")
+					extractStreamingUsage(c.usageLogFile, respBody)
+				} else {
+					extractUsage(c.usageLogFile, respBody)
+				}
+			} else {
+				extractUsage(c.usageLogFile, respBody)
+			}
 			c.fullLogf("Response body: %s", string(respBody))
-			extractUsage(c.usageLogFile, respBody)
 			replaceBody(resp, respBody)
 		}
 	} else if resp.StatusCode >= 300 {

@@ -9,6 +9,8 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -56,6 +58,8 @@ func StartCodexProxy(baseUrl string, modelMappings []string, port string, verbos
 		lt.usageLogFile = usageLogFile
 		lt.fullLogger = fullLogger
 		lt.logWebSocketMessages = true
+		lt.codexTransform = true
+		lt.codexAuthFile = codexAuthPath()
 	}
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -70,10 +74,10 @@ func StartCodexProxy(baseUrl string, modelMappings []string, port string, verbos
 	if logFile != "" {
 		log.Printf("Full proxy log: %s", logFile)
 	}
-	fmt.Printf("\nTo use with Codex ChatGPT login/OAuth, add to ~/.codex/config.toml:\n")
+	fmt.Printf("\nCodex CLI — add to ~/.codex/config.toml:\n")
 	fmt.Printf("  model_provider = \"openai\"\n")
 	fmt.Printf("  openai_base_url = \"%s\"\n", endpoint)
-	fmt.Printf("\n  # or define a custom provider:\n")
+	fmt.Printf("\n  # or a custom provider:\n")
 	fmt.Printf("  # model_provider = \"llm-proxy\"\n")
 	fmt.Printf("  # [model_providers.llm-proxy]\n")
 	fmt.Printf("  # name = \"LLM Proxy\"\n")
@@ -81,18 +85,190 @@ func StartCodexProxy(baseUrl string, modelMappings []string, port string, verbos
 	fmt.Printf("  # requires_openai_auth = true\n")
 	fmt.Printf("  # wire_api = \"responses\"\n")
 	fmt.Printf("  # supports_websockets = true\n")
-	fmt.Printf("\nTemporary Codex verification without editing ~/.codex/config.toml:\n")
+	fmt.Printf("\nGrok CLI — add to ~/.grok/config.toml:\n")
+	fmt.Printf("  [model.codex-sub]\n")
+	fmt.Printf("  model = \"gpt-5.5\"\n")
+	fmt.Printf("  base_url = \"%s\"\n", endpoint)
+	fmt.Printf("  name = \"Codex Subscription (GPT-5.5)\"\n")
+	fmt.Printf("  api_backend = \"responses\"\n")
+	fmt.Printf("  context_window = 200000\n")
+	fmt.Printf("\n  # Auth is injected automatically from ~/.codex/auth.json.\n")
+	fmt.Printf("\nVerify:\n")
+	fmt.Printf("  # Codex CLI (no config edit needed):\n")
 	fmt.Printf("  codex exec --ephemeral -c 'model_provider=\"openai\"' -c 'openai_base_url=\"%s\"' 'one word of capital of french'\n", endpoint)
-	fmt.Printf("\n  # or with the custom provider above:\n")
-	fmt.Printf("  codex exec --ephemeral \\\n")
-	fmt.Printf("    -c 'model_provider=\"llm-proxy\"' \\\n")
-	fmt.Printf("    -c 'model_providers.llm-proxy.name=\"LLM Proxy\"' \\\n")
-	fmt.Printf("    -c 'model_providers.llm-proxy.base_url=\"%s\"' \\\n", endpoint)
-	fmt.Printf("    -c 'model_providers.llm-proxy.requires_openai_auth=true' \\\n")
-	fmt.Printf("    -c 'model_providers.llm-proxy.wire_api=\"responses\"' \\\n")
-	fmt.Printf("    -c 'model_providers.llm-proxy.supports_websockets=true' \\\n")
-	fmt.Printf("    'one word of capital of french'\n\n")
+	fmt.Printf("\n  # Grok CLI (after adding the config above + exporting env vars):\n")
+	fmt.Printf("  grok -m codex-sub -p 'Reply with exactly: runner-ok' --always-approve --disable-web-search --no-subagents --max-turns 1\n")
+	fmt.Printf("\n")
 	return http.ListenAndServe(addr, nil)
+}
+
+// readCodexAuth reads the access token and account ID from a Codex
+// auth.json file. The file is re-read on every call so a refreshed
+// token (e.g. after `codex login`) is picked up without restarting
+// the proxy.
+func readCodexAuth(path string) (accessToken string, accountID string, err error) {
+	expanded, err := logutil.ExpandPath(path)
+	if err != nil {
+		return "", "", err
+	}
+	data, err := os.ReadFile(expanded)
+	if err != nil {
+		return "", "", err
+	}
+	var auth struct {
+		Tokens struct {
+			AccessToken string `json:"access_token"`
+			AccountID   string `json:"account_id"`
+		} `json:"tokens"`
+	}
+	if err := json.Unmarshal(data, &auth); err != nil {
+		return "", "", err
+	}
+	if auth.Tokens.AccessToken == "" {
+		return "", "", fmt.Errorf("%s does not contain tokens.access_token; run `codex login` first", expanded)
+	}
+	return auth.Tokens.AccessToken, auth.Tokens.AccountID, nil
+}
+
+// codexAuthPath returns the default path to ~/.codex/auth.json.
+func codexAuthPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".codex", "auth.json")
+}
+
+// transformCodexRequest adapts a standard OpenAI Responses API request
+// for the Codex ChatGPT OAuth backend, which:
+//   - rejects system role messages (move content to instructions)
+//   - requires store=false
+//   - requires stream=true
+func transformCodexRequest(data map[string]interface{}, logf func(format string, args ...any)) {
+	input, ok := data["input"].([]interface{})
+	if !ok {
+		return
+	}
+	var kept []interface{}
+	var instructions []string
+	for _, item := range input {
+		msg, ok := item.(map[string]interface{})
+		if !ok {
+			kept = append(kept, item)
+			continue
+		}
+		role, _ := msg["role"].(string)
+		if role == "system" {
+			content := msg["content"]
+			switch c := content.(type) {
+			case string:
+				instructions = append(instructions, c)
+			case []interface{}:
+				for _, part := range c {
+					pm, ok := part.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					if t, _ := pm["type"].(string); t == "text" || t == "input_text" {
+						if text, ok := pm["text"].(string); ok {
+							instructions = append(instructions, text)
+						}
+					}
+				}
+			}
+			continue
+		}
+		kept = append(kept, item)
+	}
+	if len(instructions) > 0 {
+		data["instructions"] = strings.Join(instructions, "\n\n")
+		logf("Codex transform: moved %d system message(s) to instructions", len(instructions))
+	}
+	data["input"] = kept
+	data["store"] = false
+	data["stream"] = true
+}
+
+// patchCodexSSEOutput collects output items from SSE
+// response.output_item.done events and injects them into the
+// response.completed event's output array. The Codex backend streams
+// output items as individual events but leaves the output array
+// empty in the final response.completed event, causing clients that
+// read output from the completed event to see no results and retry
+// indefinitely.
+func patchCodexSSEOutput(body []byte) []byte {
+	lines := strings.Split(string(body), "\n")
+
+	// Collect output items in order from response.output_item.done events.
+	var outputItems []json.RawMessage
+	for _, line := range lines {
+		jsonData, ok := parseSSEData(line)
+		if !ok {
+			continue
+		}
+		var ev struct {
+			Type string          `json:"type"`
+			Item json.RawMessage `json:"item,omitempty"`
+		}
+		if err := json.Unmarshal([]byte(jsonData), &ev); err != nil {
+			continue
+		}
+		if ev.Type == "response.output_item.done" && len(ev.Item) > 0 {
+			outputItems = append(outputItems, ev.Item)
+		}
+	}
+	if len(outputItems) == 0 {
+		return body
+	}
+
+	// Patch the response.completed event to include collected output items.
+	var result []string
+	for _, line := range lines {
+		jsonData, ok := parseSSEData(line)
+		if !ok {
+			result = append(result, line)
+			continue
+		}
+		if !strings.Contains(jsonData, "response.completed") {
+			result = append(result, line)
+			continue
+		}
+		var ev map[string]interface{}
+		if err := json.Unmarshal([]byte(jsonData), &ev); err != nil {
+			result = append(result, line)
+			continue
+		}
+		if t, _ := ev["type"].(string); t != "response.completed" {
+			result = append(result, line)
+			continue
+		}
+		resp, ok := ev["response"].(map[string]interface{})
+		if !ok {
+			result = append(result, line)
+			continue
+		}
+		items := make([]interface{}, len(outputItems))
+		for i, raw := range outputItems {
+			var v interface{}
+			json.Unmarshal(raw, &v)
+			items[i] = v
+		}
+		resp["output"] = items
+		newData, err := json.Marshal(ev)
+		if err != nil {
+			result = append(result, line)
+			continue
+		}
+		result = append(result, "data: "+string(newData))
+	}
+	return []byte(strings.Join(result, "\n"))
+}
+
+func parseSSEData(line string) (string, bool) {
+	if !strings.HasPrefix(line, "data: ") {
+		return "", false
+	}
+	return strings.TrimPrefix(line, "data: "), true
 }
 
 type proxyOptions struct {
