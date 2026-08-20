@@ -140,6 +140,7 @@ func codexAuthPath() string {
 // transformCodexRequest adapts a standard OpenAI Responses API request
 // for the Codex ChatGPT OAuth backend, which:
 //   - rejects system role messages (move content to instructions)
+//   - rejects input items with empty-string id fields (strip them)
 //   - requires store=false
 //   - requires stream=true
 func transformCodexRequest(data map[string]interface{}, logf func(format string, args ...any)) {
@@ -175,6 +176,12 @@ func transformCodexRequest(data map[string]interface{}, logf func(format string,
 				}
 			}
 			continue
+		}
+		// The Codex backend rejects input items whose "id" field is an
+		// empty string (e.g. function_call items from Grok). Strip it so
+		// the backend treats the item as having no id.
+		if id, _ := msg["id"].(string); id == "" {
+			delete(msg, "id")
 		}
 		kept = append(kept, item)
 	}
