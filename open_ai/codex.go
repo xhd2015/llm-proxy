@@ -24,7 +24,12 @@ const (
 	maxWebSocketLogPayload      = 4 << 10
 )
 
+// StartCodexProxy starts a Codex OAuth proxy with the default stream behavior.
 func StartCodexProxy(baseUrl string, modelMappings []string, port string, verbose bool, logFile string) error {
+	return startCodexProxy(baseUrl, modelMappings, port, verbose, logFile, false)
+}
+
+func startCodexProxy(baseUrl string, modelMappings []string, port string, verbose bool, logFile string, feedToGrokCLI bool) error {
 	if baseUrl == "" {
 		baseUrl = "https://chatgpt.com/backend-api/codex"
 	}
@@ -57,15 +62,15 @@ func StartCodexProxy(baseUrl string, modelMappings []string, port string, verbos
 		fullLogger:                  fullLogger,
 		logWebSocketMessages:        true,
 		codexTransform:              true,
+		feedToGrokCLI:               feedToGrokCLI,
 		codexAuthFile:               codexAuthPath(),
-	})
-
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		proxy.ServeHTTP(w, r)
 	})
 
 	addr := "localhost:" + port
 	endpoint := fmt.Sprintf("http://%s/v1", addr)
+	handler := newCodexProxyHandler(proxy, feedToGrokCLI, codexModelsCachePath(), endpoint)
+	http.HandleFunc("/", handler.ServeHTTP)
+
 	log.Printf("Codex OAuth proxy running at %s", endpoint)
 	log.Printf("Upstream: %s", target.String())
 	log.Printf("Usage log: %s", usageLogFile)

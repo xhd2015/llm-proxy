@@ -73,6 +73,18 @@ Use `--codex` when Codex is signed in with ChatGPT/OAuth and you want to route C
 llm-proxy --codex --port 8891
 ```
 
+When routing the Codex backend to Grok CLI, add `--feed-to-grok-cli` to enable
+Grok CLI compatibility behavior: incompatible JSON `keepalive` SSE events are
+dropped while logged, and the local proxy serves Grok's `models-v2` catalog
+request from the Codex model cache.
+
+```sh
+llm-proxy --codex --feed-to-grok-cli --port 8891
+```
+
+See [Grok CLI compatibility](../docs/codex/grok-cli.md) for the session-resume
+behavior, model catalog response, and opt-in scope.
+
 Append full proxy logs while keeping terminal output brief:
 
 ```sh

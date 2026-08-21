@@ -11,12 +11,19 @@ import (
 // codexModelEntry mirrors the relevant fields of a model entry in
 // ~/.codex/models_cache.json.
 type codexModelEntry struct {
-	Slug                   string                 `json:"slug"`
-	DisplayName            string                 `json:"display_name"`
-	DefaultReasoningLevel  string                 `json:"default_reasoning_level"`
-	Visibility             string                 `json:"visibility"`
-	SupportedInAPI         bool                   `json:"supported_in_api"`
+	Slug                     string                `json:"slug"`
+	DisplayName              string                `json:"display_name"`
+	Description              string                `json:"description"`
+	ContextWindow            uint64                `json:"context_window"`
+	DefaultReasoningLevel    string                `json:"default_reasoning_level"`
+	Visibility               string                `json:"visibility"`
+	SupportedInAPI           bool                  `json:"supported_in_api"`
 	SupportedReasoningLevels []codexReasoningLevel `json:"supported_reasoning_levels"`
+}
+
+type codexModelsCache struct {
+	ETag   string            `json:"etag"`
+	Models []codexModelEntry `json:"models"`
 }
 
 type codexReasoningLevel struct {
@@ -31,15 +38,9 @@ type codexReasoningLevel struct {
 // proxy can parse and inject it upstream.
 func handleCodexModels(args []string) error {
 	path := codexModelsCachePath()
-	data, err := os.ReadFile(path)
+	cache, err := readCodexModelsCache(path)
 	if err != nil {
-		return fmt.Errorf("cannot read %s: %w\nrun `codex login` to populate the cache", path, err)
-	}
-	var cache struct {
-		Models []codexModelEntry `json:"models"`
-	}
-	if err := json.Unmarshal(data, &cache); err != nil {
-		return fmt.Errorf("invalid models cache %s: %w", path, err)
+		return err
 	}
 
 	endpoint := "http://localhost:8891/v1"
@@ -75,6 +76,18 @@ func handleCodexModels(args []string) error {
 		}
 	}
 	return nil
+}
+
+func readCodexModelsCache(path string) (codexModelsCache, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return codexModelsCache{}, fmt.Errorf("cannot read %s: %w\nrun `codex login` to populate the cache", path, err)
+	}
+	var cache codexModelsCache
+	if err := json.Unmarshal(data, &cache); err != nil {
+		return codexModelsCache{}, fmt.Errorf("invalid models cache %s: %w", path, err)
+	}
+	return cache, nil
 }
 
 // slugToSection converts a model slug like "gpt-5.6-luna" and an

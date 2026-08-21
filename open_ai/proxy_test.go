@@ -3,6 +3,7 @@ package openai
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -131,6 +132,16 @@ func TestHandleRejectsOpenAIAndCodex(t *testing.T) {
 	}
 }
 
+func TestHandleRejectsGrokCLICompatibilityWithoutCodex(t *testing.T) {
+	err := Handle([]string{"--feed-to-grok-cli", "--base-url", "https://example.test"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "--feed-to-grok-cli requires --codex") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestNormalizeStreamingResponseAnthropicUsage(t *testing.T) {
 	body := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"cache_creation_input_tokens\":null,\"cache_read_input_tokens\":null}}}\n\n")
 
@@ -158,5 +169,74 @@ func TestNormalizeStreamingResponseLeavesOtherEventsUntouched(t *testing.T) {
 	body := []byte("data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hello\"}}\n\n")
 	if got := normalizeStreamingResponse(body, false, true); !bytes.Equal(got, body) {
 		t.Fatalf("unrelated event changed: %s", got)
+	}
+}
+
+func TestFilterGrokCLIKeepalivesDropsAndLogsKeepalives(t *testing.T) {
+	body := []byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\ndata: {\"type\":\"keepalive\",\"sequence_number\":1}\n\n: transport keepalive\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\"}}\n\n")
+	var terminalLogs, fullLogs []string
+
+	got := filterGrokCLIKeepalives(body,
+		func(format string, args ...any) { terminalLogs = append(terminalLogs, fmt.Sprintf(format, args...)) },
+		func(format string, args ...any) { fullLogs = append(fullLogs, fmt.Sprintf(format, args...)) },
+	)
+
+	if strings.Contains(string(got), `\"type\":\"keepalive\"`) {
+		t.Fatalf("keepalive was forwarded: %s", got)
+	}
+	for _, want := range []string{"response.created", "response.completed", ": transport keepalive"} {
+		if !strings.Contains(string(got), want) {
+			t.Fatalf("filtered stream missing %q: %s", want, got)
+		}
+	}
+	if len(terminalLogs) != 1 || terminalLogs[0] != "Grok CLI compatibility: dropped upstream SSE event type=keepalive" {
+		t.Fatalf("terminal logs = %v", terminalLogs)
+	}
+	if len(fullLogs) != 1 || !strings.Contains(fullLogs[0], `"type":"keepalive"`) {
+		t.Fatalf("full logs = %v", fullLogs)
+	}
+}
+
+func TestFilterGrokCLIKeepalivesLeavesStreamsWithoutKeepalivesUnchanged(t *testing.T) {
+	body := []byte("data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"response.completed\"}\n\n")
+	got := filterGrokCLIKeepalives(body,
+		func(string, ...any) { t.Fatal("unexpected terminal log") },
+		func(string, ...any) { t.Fatal("unexpected full log") },
+	)
+	if !bytes.Equal(got, body) {
+		t.Fatalf("stream changed:\n got: %q\nwant: %q", got, body)
+	}
+}
+
+func TestHandleNonStreamingResponseFiltersGrokCLIKeepalives(t *testing.T) {
+	body := []byte("data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"keepalive\",\"sequence_number\":1}\n\ndata: {\"type\":\"response.completed\"}\n\n")
+	resp := &http.Response{
+		Header: http.Header{"Content-Type": []string{"text/plain"}},
+		Body:   io.NopCloser(bytes.NewReader(body)),
+	}
+
+	transport := &loggingTransport{
+		codexTransform: true,
+		feedToGrokCLI:  true,
+		usageLogFile:   "",
+	}
+	got, err := transport.handleNonStreamingResponse(resp)
+	if err != nil {
+		t.Fatalf("handleNonStreamingResponse() error = %v", err)
+	}
+	defer got.Body.Close()
+
+	gotBody, err := io.ReadAll(got.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(gotBody), `"type":"keepalive"`) {
+		t.Fatalf("keepalive was forwarded: %s", gotBody)
+	}
+	if !strings.Contains(string(gotBody), `"type":"response.created"`) || !strings.Contains(string(gotBody), `"type":"response.completed"`) {
+		t.Fatalf("filtered stream omitted a response event: %s", gotBody)
+	}
+	if contentType := got.Header.Get("Content-Type"); contentType != "text/event-stream" {
+		t.Fatalf("Content-Type = %q, want text/event-stream", contentType)
 	}
 }

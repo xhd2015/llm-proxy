@@ -38,6 +38,7 @@ type proxyOptions struct {
 	fullLogger                  *logutil.Logger
 	logWebSocketMessages        bool
 	codexTransform              bool
+	feedToGrokCLI               bool
 	codexAuthFile               string
 }
 
@@ -63,6 +64,7 @@ func newProxyWithOptions(target *url.URL, modelMap map[string]string, verbose bo
 		fullLogger:              opts.fullLogger,
 		logWebSocketMessages:    opts.logWebSocketMessages,
 		codexTransform:          opts.codexTransform,
+		feedToGrokCLI:           opts.feedToGrokCLI,
 		codexAuthFile:           opts.codexAuthFile,
 		verbose:                 verbose,
 	}
@@ -103,6 +105,7 @@ type loggingTransport struct {
 	fullLogger              *logutil.Logger
 	logWebSocketMessages    bool
 	codexTransform          bool
+	feedToGrokCLI           bool
 	codexAuthFile           string
 	verbose                 bool
 	Transport               http.RoundTripper
@@ -262,6 +265,9 @@ func (c *loggingTransport) handleStreamingResponse(resp *http.Response) {
 	if c.codexTransform {
 		respBody = patchCodexSSEOutput(respBody)
 	}
+	if c.feedToGrokCLI {
+		respBody = filterGrokCLIKeepalives(respBody, c.logf, c.fullLogf)
+	}
 	if c.filterTextSnapshot || c.normalizeAnthropicUsage {
 		respBody = normalizeStreamingResponse(respBody, c.filterTextSnapshot, c.normalizeAnthropicUsage)
 	}
@@ -288,6 +294,9 @@ func (c *loggingTransport) handleNonStreamingResponse(resp *http.Response) (*htt
 		// event stream.
 		trimmed := bytes.TrimSpace(respBody)
 		if bytes.HasPrefix(trimmed, []byte("event:")) || bytes.HasPrefix(trimmed, []byte("data:")) {
+			if c.feedToGrokCLI {
+				respBody = filterGrokCLIKeepalives(respBody, c.logf, c.fullLogf)
+			}
 			resp.Header.Set("Content-Type", "text/event-stream")
 			extractStreamingUsage(c.usageLogFile, respBody)
 		} else {
@@ -349,6 +358,40 @@ func (t *loggingTransport) transport() http.RoundTripper {
 		return t.Transport
 	}
 	return http.DefaultTransport
+}
+
+// filterGrokCLIKeepalives drops JSON keepalive events that Grok's Responses
+// decoder does not recognize. It returns the original bytes when no event was
+// removed so ordinary Codex clients retain their exact upstream stream.
+func filterGrokCLIKeepalives(body []byte, logf, fullLogf func(format string, args ...any)) []byte {
+	lines := strings.Split(string(body), "\n")
+	filtered := make([]string, 0, len(lines))
+	removed := false
+
+	for _, line := range lines {
+		jsonData, ok := parseSSEData(line)
+		if !ok {
+			filtered = append(filtered, line)
+			continue
+		}
+
+		var event struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal([]byte(jsonData), &event); err != nil || event.Type != "keepalive" {
+			filtered = append(filtered, line)
+			continue
+		}
+
+		removed = true
+		logf("Grok CLI compatibility: dropped upstream SSE event type=keepalive")
+		fullLogf("Grok CLI compatibility: dropped upstream SSE event: %s", line)
+	}
+
+	if !removed {
+		return body
+	}
+	return []byte(strings.Join(filtered, "\n"))
 }
 
 // normalizeStreamingResponse rewrites SSE data lines to drop text snapshots

@@ -34,6 +34,7 @@ Options:
   --log FILE                       append full proxy logs to FILE while keeping terminal logs brief
   --open-ai                        start a local proxy to OpenAI with usage tracking
   --codex                          start a local proxy to Codex's ChatGPT OAuth backend
+  --feed-to-grok-cli               drop incompatible Codex keepalive stream events for Grok CLI
   --usages                         show usage summary from the usage log
   codex-models                    print grok config.toml blocks for all Codex models
 
@@ -74,12 +75,14 @@ func Handle(args []string) error {
 	var logFile string
 	var filterTextSnapshot bool
 	var normalizeAnthropicUsage bool
+	var feedToGrokCLI bool
 	args, err := flags.String("--base-url", &baseUrl).
 		StringSlice("--model", &modelMappings).
 		String("--port", &port).
 		String("--log", &logFile).
 		Bool("--filter-text-snapshot", &filterTextSnapshot).
 		Bool("--normalize-anthropic-usage", &normalizeAnthropicUsage).
+		Bool("--feed-to-grok-cli", &feedToGrokCLI).
 		Bool("-v,--verbose", &verbose).
 		Bool("--open-ai", &openAI).
 		Bool("--codex", &codex).
@@ -92,6 +95,9 @@ func Handle(args []string) error {
 	if openAI && codex {
 		return fmt.Errorf("--open-ai and --codex cannot be used together")
 	}
+	if feedToGrokCLI && !codex {
+		return fmt.Errorf("--feed-to-grok-cli requires --codex")
+	}
 	if showUsages {
 		return HandleUsages(args)
 	}
@@ -102,7 +108,7 @@ func Handle(args []string) error {
 		return StartAPIProxy(baseUrl, modelMappings, port, verbose, logFile)
 	}
 	if codex {
-		return StartCodexProxy(baseUrl, modelMappings, port, verbose, logFile)
+		return startCodexProxy(baseUrl, modelMappings, port, verbose, logFile, feedToGrokCLI)
 	}
 	if baseUrl == "" {
 		return fmt.Errorf("missing --base-url")
