@@ -40,3 +40,24 @@ func TestLogHeadersRedactsSensitiveHeaders(t *testing.T) {
 		t.Fatalf("LogHeaders missing Accept header: %s", got)
 	}
 }
+
+func TestResolveLogFile(t *testing.T) {
+	tests := []struct {
+		name        string
+		flagValue   string
+		wantPath    string
+		wantDefault bool
+	}{
+		{name: "absent defaults to /tmp/llm-proxy.log", flagValue: "", wantPath: "/tmp/llm-proxy.log", wantDefault: true},
+		{name: "off disables file logging", flagValue: "off", wantPath: "", wantDefault: false},
+		{name: "explicit path used", flagValue: "/var/log/x.log", wantPath: "/var/log/x.log", wantDefault: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path, defaulted := ResolveLogFile(tt.flagValue)
+			if path != tt.wantPath || defaulted != tt.wantDefault {
+				t.Fatalf("ResolveLogFile(%q) = (%q, %v), want (%q, %v)", tt.flagValue, path, defaulted, tt.wantPath, tt.wantDefault)
+			}
+		})
+	}
+}

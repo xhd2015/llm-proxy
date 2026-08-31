@@ -367,6 +367,16 @@ func TestHandleRejectsInvalidModelCapability(t *testing.T) {
 	}
 }
 
+func TestHandleRejectsColorAndNoColor(t *testing.T) {
+	err := Handle([]string{"--color", "--no-color", "--base-url", "https://example.test"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "--color and --no-color cannot be specified together") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 // TestLoggingTransportModelAliasAndCapability verifies the alias remap and the
 // no-image strip compose: capabilities key on the client-facing alias (the
 // pre-remap model), then the model is rewritten to the upstream id.

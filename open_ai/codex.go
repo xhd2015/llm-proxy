@@ -25,11 +25,11 @@ const (
 )
 
 // StartCodexProxy starts a Codex OAuth proxy with the default stream behavior.
-func StartCodexProxy(baseUrl string, modelMappings []string, port string, verbose bool, logFile string, modelCaps map[string]ModelCapability) error {
-	return startCodexProxy(baseUrl, modelMappings, port, verbose, logFile, false, modelCaps)
+func StartCodexProxy(baseUrl string, modelMappings []string, port string, verbose bool, logFile string, modelCaps map[string]ModelCapability, colorEnabled bool) error {
+	return startCodexProxy(baseUrl, modelMappings, port, verbose, logFile, false, modelCaps, colorEnabled)
 }
 
-func startCodexProxy(baseUrl string, modelMappings []string, port string, verbose bool, logFile string, feedToGrokCLI bool, modelCaps map[string]ModelCapability) error {
+func startCodexProxy(baseUrl string, modelMappings []string, port string, verbose bool, logFile string, feedToGrokCLI bool, modelCaps map[string]ModelCapability, colorEnabled bool) error {
 	if baseUrl == "" {
 		baseUrl = "https://chatgpt.com/backend-api/codex"
 	}
@@ -75,9 +75,6 @@ func startCodexProxy(baseUrl string, modelMappings []string, port string, verbos
 	log.Printf("Codex OAuth proxy running at %s", endpoint)
 	log.Printf("Upstream: %s", target.String())
 	log.Printf("Usage log: %s", usageLogFile)
-	if logFile != "" {
-		log.Printf("Full proxy log: %s", logFile)
-	}
 	fmt.Printf("\nCodex CLI — add to ~/.codex/config.toml:\n")
 	fmt.Printf("  model_provider = \"openai\"\n")
 	fmt.Printf("  openai_base_url = \"%s\"\n", endpoint)

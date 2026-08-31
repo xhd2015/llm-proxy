@@ -22,6 +22,26 @@ func New(w io.Writer) *Logger {
 	return &Logger{w: w}
 }
 
+// DefaultLogFile is the full-log destination used when --log is not passed.
+const DefaultLogFile = "/tmp/llm-proxy.log"
+
+// LogOff is the --log value that disables file logging entirely.
+const LogOff = "off"
+
+// ResolveLogFile maps the --log flag value to the file to open.
+// It returns the resolved path and whether the default was applied (so the
+// caller can print a notice). A false resolved value means no file logging.
+func ResolveLogFile(flagValue string) (path string, defaulted bool) {
+	switch flagValue {
+	case LogOff:
+		return "", false
+	case "":
+		return DefaultLogFile, true
+	default:
+		return flagValue, false
+	}
+}
+
 func OpenAppend(path string) (*Logger, io.Closer, error) {
 	if path == "" {
 		return nil, nil, nil

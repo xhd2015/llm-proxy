@@ -39,6 +39,9 @@ Options:
                                    a compatibility workaround for strict clients such as Grok Build
   -v,--verbose                     show verbose info
   --log FILE                       append full proxy logs to FILE while keeping terminal logs brief
+                                   (default: /tmp/llm-proxy.log; --log=off disables file logging)
+  --color                          force color output on
+  --no-color                       force color output off (NO_COLOR env also disables in auto)
   --open-ai                        start a local proxy to OpenAI with usage tracking
   --codex                          start a local proxy to Codex's ChatGPT OAuth backend
   --feed-to-grok-cli               drop incompatible Codex keepalive stream events for Grok CLI
@@ -85,6 +88,8 @@ func Handle(args []string) error {
 	var filterTextSnapshot bool
 	var normalizeAnthropicUsage bool
 	var feedToGrokCLI bool
+	var colorFlag *bool
+	var noColorFlag *bool
 	args, err := flags.String("--base-url", &baseUrl).
 		StringSlice("--model", &modelMappings).
 		StringSlice("--model-alias", &modelAliasEntries).
@@ -94,6 +99,8 @@ func Handle(args []string) error {
 		Bool("--filter-text-snapshot", &filterTextSnapshot).
 		Bool("--normalize-anthropic-usage", &normalizeAnthropicUsage).
 		Bool("--feed-to-grok-cli", &feedToGrokCLI).
+		Bool("--color", &colorFlag).
+		Bool("--no-color", &noColorFlag).
 		Bool("-v,--verbose", &verbose).
 		Bool("--open-ai", &openAI).
 		Bool("--codex", &codex).
@@ -108,6 +115,15 @@ func Handle(args []string) error {
 	}
 	if feedToGrokCLI && !codex {
 		return fmt.Errorf("--feed-to-grok-cli requires --codex")
+	}
+	colorMode, err := colorModeFromFlags(colorFlag, noColorFlag)
+	if err != nil {
+		return err
+	}
+	colorEnabled := stderrColorEnabled(colorMode)
+	logFile, logDefaulted := logutil.ResolveLogFile(logFile)
+	if logDefaulted {
+		fmt.Fprintln(os.Stderr, grayNotice(colorEnabled, "full proxy log: %s (default; --log=off to disable)", logFile))
 	}
 	modelCaps, err := parseModelCapabilities(modelCapabilityEntries)
 	if err != nil {
@@ -124,10 +140,10 @@ func Handle(args []string) error {
 		return fmt.Errorf("unrecognized extra args: %s", strings.Join(args, " "))
 	}
 	if openAI {
-		return StartAPIProxy(baseUrl, modelMappings, port, verbose, logFile, modelCaps)
+		return StartAPIProxy(baseUrl, modelMappings, port, verbose, logFile, modelCaps, colorEnabled)
 	}
 	if codex {
-		return startCodexProxy(baseUrl, modelMappings, port, verbose, logFile, feedToGrokCLI, modelCaps)
+		return startCodexProxy(baseUrl, modelMappings, port, verbose, logFile, feedToGrokCLI, modelCaps, colorEnabled)
 	}
 	if baseUrl == "" {
 		return fmt.Errorf("missing --base-url")
@@ -172,13 +188,10 @@ func Handle(args []string) error {
 
 	addr := ":" + port
 	log.Printf("Starting proxy server on %s", addr)
-	if logFile != "" {
-		log.Printf("Full proxy log: %s", logFile)
-	}
 	return http.ListenAndServe(addr, nil)
 }
 
-func StartAPIProxy(baseUrl string, modelMappings []string, port string, verbose bool, logFile string, modelCaps map[string]ModelCapability) error {
+func StartAPIProxy(baseUrl string, modelMappings []string, port string, verbose bool, logFile string, modelCaps map[string]ModelCapability, colorEnabled bool) error {
 	if baseUrl == "" {
 		baseUrl = "https://api.openai.com"
 	}
@@ -218,9 +231,6 @@ func StartAPIProxy(baseUrl string, modelMappings []string, port string, verbose 
 	endpoint := fmt.Sprintf("http://%s/v1", addr)
 	log.Printf("OpenAI proxy running at %s", endpoint)
 	log.Printf("Usage log: %s", usageLogFile)
-	if logFile != "" {
-		log.Printf("Full proxy log: %s", logFile)
-	}
 	fmt.Printf("\nTo use with opencode, configure opencode.json:\n")
 	fmt.Printf("  \"provider\": {\n")
 	fmt.Printf("    \"openai\": {\n")
