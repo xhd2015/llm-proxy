@@ -24,6 +24,9 @@ Usage: llm-proxy [OPTIONS]
 Options:
   --base-url URL                   base url to proxy
   --model FROM=TO                  remapping models, can be repeated
+  --model-alias ALIAS=UPSTREAM     map a friendly client-facing model name to the id the
+                                   upstream accepts, can be repeated; e.g.
+                                   deepseek-v4-flash=deepseek-v4-flash
   --model-capability MODEL=opt1,opt2
                                    declare per-model capability limits, can be repeated;
                                    opts: no-image (strip image blocks, replace with a text
@@ -75,6 +78,7 @@ func Handle(args []string) error {
 	var showUsages bool
 	var baseUrl string
 	var modelMappings []string
+	var modelAliasEntries []string
 	var modelCapabilityEntries []string
 	var port string
 	var logFile string
@@ -83,6 +87,7 @@ func Handle(args []string) error {
 	var feedToGrokCLI bool
 	args, err := flags.String("--base-url", &baseUrl).
 		StringSlice("--model", &modelMappings).
+		StringSlice("--model-alias", &modelAliasEntries).
 		StringSlice("--model-capability", &modelCapabilityEntries).
 		String("--port", &port).
 		String("--log", &logFile).
@@ -108,6 +113,10 @@ func Handle(args []string) error {
 	if err != nil {
 		return err
 	}
+	modelAliases, err := parseModelMap(modelAliasEntries)
+	if err != nil {
+		return err
+	}
 	if showUsages {
 		return HandleUsages(args)
 	}
@@ -130,6 +139,11 @@ func Handle(args []string) error {
 	modelMap, err := parseModelMap(modelMappings)
 	if err != nil {
 		return err
+	}
+	// Model aliases are client-facing friendly names that resolve to the id
+	// the upstream accepts; they share the same FROM=TO rewrite as --model.
+	for alias, upstream := range modelAliases {
+		modelMap[alias] = upstream
 	}
 
 	target, err := url.Parse(baseUrl)

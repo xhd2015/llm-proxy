@@ -366,3 +366,83 @@ func TestHandleRejectsInvalidModelCapability(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+// TestLoggingTransportModelAliasAndCapability verifies the alias remap and the
+// no-image strip compose: capabilities key on the client-facing alias (the
+// pre-remap model), then the model is rewritten to the upstream id.
+func TestLoggingTransportModelAliasAndCapability(t *testing.T) {
+	body := map[string]interface{}{
+		"model": "deepseek-v4-flash",
+		"messages": []interface{}{
+			map[string]interface{}{
+				"role": "user",
+				"content": []interface{}{
+					map[string]interface{}{"type": "image", "source": map[string]interface{}{"type": "base64", "media_type": "image/png", "data": "iVBOR"}},
+					map[string]interface{}{"type": "text", "text": "what is this?"},
+				},
+			},
+		},
+	}
+	bodyBytes, _ := json.Marshal(body)
+	req := httptest.NewRequest("POST", "/v1/messages", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+
+	mockRT := &mockRoundTripper{t: t, statusCode: http.StatusOK}
+	transport := &loggingTransport{
+		// alias -> upstream id (mirrors --model-alias deepseek-v4-flash=...)
+		modelMap: map[string]string{"deepseek-v4-flash": "deepseek-v4-flash"},
+		// capability keyed on the alias
+		modelCapabilities: map[string]ModelCapability{"deepseek-v4-flash": CapNoImage},
+		Transport:         mockRT,
+	}
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	var data map[string]interface{}
+	if err := json.Unmarshal(mockRT.body, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data["model"] != "deepseek-v4-flash" {
+		t.Errorf("model = %v, want remapped upstream id deepseek-v4-flash", data["model"])
+	}
+	content := data["messages"].([]interface{})[0].(map[string]interface{})["content"].([]interface{})
+	part := content[0].(map[string]interface{})
+	if part["type"] != "text" || !strings.Contains(part["text"].(string), "image omitted") {
+		t.Errorf("image part = %v, want text note (capability keyed on alias)", part)
+	}
+	if strings.Contains(string(mockRT.body), "iVBOR") {
+		t.Errorf("image data leaked upstream: %s", mockRT.body)
+	}
+}
+
+// TestLoggingTransportUnaliasedModelPassthrough verifies a model with no alias
+// and no capability is forwarded byte-for-byte.
+func TestLoggingTransportUnaliasedModelPassthrough(t *testing.T) {
+	body := map[string]interface{}{
+		"model":    "claude-opus-5",
+		"messages": []interface{}{map[string]interface{}{"role": "user", "content": "hi"}},
+	}
+	bodyBytes, _ := json.Marshal(body)
+	req := httptest.NewRequest("POST", "/v1/messages", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+
+	mockRT := &mockRoundTripper{t: t, statusCode: http.StatusOK}
+	transport := &loggingTransport{
+		modelMap:          map[string]string{"deepseek-v4-flash": "deepseek-v4-flash"},
+		modelCapabilities: map[string]ModelCapability{"deepseek-v4-flash": CapNoImage},
+		Transport:         mockRT,
+	}
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	if !bytes.Equal(mockRT.body, bodyBytes) {
+		t.Fatalf("body changed:\n got: %s\nwant: %s", mockRT.body, bodyBytes)
+	}
+}
