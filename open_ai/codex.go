@@ -25,11 +25,11 @@ const (
 )
 
 // StartCodexProxy starts a Codex OAuth proxy with the default stream behavior.
-func StartCodexProxy(baseUrl string, modelMappings []string, port string, verbose bool, logFile string) error {
-	return startCodexProxy(baseUrl, modelMappings, port, verbose, logFile, false)
+func StartCodexProxy(baseUrl string, modelMappings []string, port string, verbose bool, logFile string, modelCaps map[string]ModelCapability) error {
+	return startCodexProxy(baseUrl, modelMappings, port, verbose, logFile, false, modelCaps)
 }
 
-func startCodexProxy(baseUrl string, modelMappings []string, port string, verbose bool, logFile string, feedToGrokCLI bool) error {
+func startCodexProxy(baseUrl string, modelMappings []string, port string, verbose bool, logFile string, feedToGrokCLI bool, modelCaps map[string]ModelCapability) error {
 	if baseUrl == "" {
 		baseUrl = "https://chatgpt.com/backend-api/codex"
 	}
@@ -64,6 +64,7 @@ func startCodexProxy(baseUrl string, modelMappings []string, port string, verbos
 		codexTransform:              true,
 		feedToGrokCLI:               feedToGrokCLI,
 		codexAuthFile:               codexAuthPath(),
+		modelCapabilities:           modelCaps,
 	})
 
 	addr := "localhost:" + port

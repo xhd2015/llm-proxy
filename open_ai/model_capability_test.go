@@ -1,0 +1,368 @@
+package openai
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+func TestParseModelCapabilities(t *testing.T) {
+	tests := []struct {
+		name    string
+		entries []string
+		want    map[string]ModelCapability
+		wantErr string
+	}{
+		{
+			name:    "no entries",
+			entries: nil,
+			want:    nil,
+		},
+		{
+			name:    "single model no-image",
+			entries: []string{"claude-haiku-5=no-image"},
+			want:    map[string]ModelCapability{"claude-haiku-5": CapNoImage},
+		},
+		{
+			name:    "multiple models",
+			entries: []string{"claude-haiku-5=no-image", "claude-sonnet-5=no-image"},
+			want: map[string]ModelCapability{
+				"claude-haiku-5":  CapNoImage,
+				"claude-sonnet-5": CapNoImage,
+			},
+		},
+		{
+			name:    "option tokens may be spaced",
+			entries: []string{"claude-haiku-5= no-image "},
+			want:    map[string]ModelCapability{"claude-haiku-5": CapNoImage},
+		},
+		{
+			name:    "missing equals",
+			entries: []string{"claude-haiku-5"},
+			wantErr: `invalid --model-capability "claude-haiku-5": want MODEL=opt1,opt2`,
+		},
+		{
+			name:    "empty model",
+			entries: []string{"=no-image"},
+			wantErr: `invalid --model-capability "=no-image": want MODEL=opt1,opt2`,
+		},
+		{
+			name:    "empty options",
+			entries: []string{"claude-haiku-5="},
+			wantErr: `invalid --model-capability "claude-haiku-5=": want MODEL=opt1,opt2`,
+		},
+		{
+			name:    "unknown option",
+			entries: []string{"claude-haiku-5=no-vision"},
+			wantErr: `unknown option "no-vision" (known: no-image)`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseModelCapabilities(tt.entries)
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %q, want substring %q", err.Error(), tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+			for model, wantCaps := range tt.want {
+				if got[model] != wantCaps {
+					t.Errorf("caps[%q] = %v, want %v", model, got[model], wantCaps)
+				}
+			}
+		})
+	}
+}
+
+func TestApplyModelCapabilitiesStripsImages(t *testing.T) {
+	caps := map[string]ModelCapability{"claude-haiku-5": CapNoImage}
+	wantNote := `[image omitted: model "claude-haiku-5" does not accept image input]`
+
+	tests := []struct {
+		name         string
+		body         map[string]interface{}
+		wantStripped int
+		// wantPart checks the rewritten part at partsPath inside the body.
+		checkContent func(t *testing.T, body map[string]interface{})
+	}{
+		{
+			name: "anthropic messages image block",
+			body: map[string]interface{}{
+				"model": "claude-haiku-5",
+				"messages": []interface{}{
+					map[string]interface{}{
+						"role": "user",
+						"content": []interface{}{
+							map[string]interface{}{"type": "image", "source": map[string]interface{}{"type": "base64", "media_type": "image/png", "data": "iVBOR"}},
+							map[string]interface{}{"type": "text", "text": "what is this?"},
+						},
+					},
+				},
+			},
+			wantStripped: 1,
+			checkContent: func(t *testing.T, body map[string]interface{}) {
+				content := body["messages"].([]interface{})[0].(map[string]interface{})["content"].([]interface{})
+				part := content[0].(map[string]interface{})
+				if part["type"] != "text" || part["text"] != wantNote {
+					t.Errorf("image part = %v, want text note", part)
+				}
+				other := content[1].(map[string]interface{})
+				if other["type"] != "text" || other["text"] != "what is this?" {
+					t.Errorf("text part changed: %v", other)
+				}
+			},
+		},
+		{
+			name: "openai chat completions image_url",
+			body: map[string]interface{}{
+				"model": "claude-haiku-5",
+				"messages": []interface{}{
+					map[string]interface{}{
+						"role": "user",
+						"content": []interface{}{
+							map[string]interface{}{"type": "image_url", "image_url": map[string]interface{}{"url": "data:image/png;base64,iVBOR"}},
+						},
+					},
+				},
+			},
+			wantStripped: 1,
+			checkContent: func(t *testing.T, body map[string]interface{}) {
+				content := body["messages"].([]interface{})[0].(map[string]interface{})["content"].([]interface{})
+				part := content[0].(map[string]interface{})
+				if part["type"] != "text" || part["text"] != wantNote {
+					t.Errorf("image_url part = %v, want text note", part)
+				}
+			},
+		},
+		{
+			name: "openai responses input_image",
+			body: map[string]interface{}{
+				"model": "claude-haiku-5",
+				"input": []interface{}{
+					map[string]interface{}{
+						"role": "user",
+						"content": []interface{}{
+							map[string]interface{}{"type": "input_text", "text": "describe"},
+							map[string]interface{}{"type": "input_image", "image_url": "data:image/png;base64,iVBOR"},
+							map[string]interface{}{"type": "input_image", "image_url": "data:image/png;base64,iVBOR"},
+						},
+					},
+				},
+			},
+			wantStripped: 2,
+			checkContent: func(t *testing.T, body map[string]interface{}) {
+				content := body["input"].([]interface{})[0].(map[string]interface{})["content"].([]interface{})
+				if content[0].(map[string]interface{})["type"] != "input_text" {
+					t.Errorf("text part changed: %v", content[0])
+				}
+				for _, i := range []int{1, 2} {
+					part := content[i].(map[string]interface{})
+					if part["type"] != "input_text" || part["text"] != wantNote {
+						t.Errorf("input_image part %d = %v, want input_text note", i, part)
+					}
+				}
+			},
+		},
+		{
+			name: "anthropic tool_result nested image",
+			body: map[string]interface{}{
+				"model": "claude-haiku-5",
+				"messages": []interface{}{
+					map[string]interface{}{
+						"role": "user",
+						"content": []interface{}{
+							map[string]interface{}{
+								"type":        "tool_result",
+								"tool_use_id": "toolu_1",
+								"content": []interface{}{
+									map[string]interface{}{"type": "image", "source": map[string]interface{}{"type": "base64", "media_type": "image/png", "data": "iVBOR"}},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantStripped: 1,
+			checkContent: func(t *testing.T, body map[string]interface{}) {
+				toolResult := body["messages"].([]interface{})[0].(map[string]interface{})["content"].([]interface{})[0].(map[string]interface{})
+				part := toolResult["content"].([]interface{})[0].(map[string]interface{})
+				if part["type"] != "text" || part["text"] != wantNote {
+					t.Errorf("nested image part = %v, want text note", part)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var logs []string
+			got := applyModelCapabilities(tt.body, caps, func(format string, args ...any) {
+				logs = append(logs, fmt.Sprintf(format, args...))
+			})
+			if got != tt.wantStripped {
+				t.Fatalf("stripped = %d, want %d", got, tt.wantStripped)
+			}
+			tt.checkContent(t, tt.body)
+			if len(logs) != 1 || !strings.Contains(logs[0], "model-capability: stripped") || !strings.Contains(logs[0], "claude-haiku-5") {
+				t.Fatalf("logs = %v", logs)
+			}
+		})
+	}
+}
+
+func TestApplyModelCapabilitiesPassthrough(t *testing.T) {
+	caps := map[string]ModelCapability{"claude-haiku-5": CapNoImage}
+	imageContent := []interface{}{
+		map[string]interface{}{"type": "image", "source": map[string]interface{}{"type": "base64", "media_type": "image/png", "data": "iVBOR"}},
+	}
+
+	tests := []struct {
+		name string
+		caps map[string]ModelCapability
+		body map[string]interface{}
+	}{
+		{
+			name: "no capabilities configured",
+			caps: nil,
+			body: map[string]interface{}{"model": "claude-haiku-5", "messages": []interface{}{map[string]interface{}{"role": "user", "content": imageContent}}},
+		},
+		{
+			name: "model not flagged",
+			caps: caps,
+			body: map[string]interface{}{"model": "claude-opus-5", "messages": []interface{}{map[string]interface{}{"role": "user", "content": imageContent}}},
+		},
+		{
+			name: "flagged model without images",
+			caps: caps,
+			body: map[string]interface{}{"model": "claude-haiku-5", "messages": []interface{}{map[string]interface{}{"role": "user", "content": []interface{}{map[string]interface{}{"type": "text", "text": "hi"}}}}},
+		},
+		{
+			name: "flagged model with string content",
+			caps: caps,
+			body: map[string]interface{}{"model": "claude-haiku-5", "messages": []interface{}{map[string]interface{}{"role": "user", "content": "hi"}}},
+		},
+		{
+			name: "missing model field",
+			caps: caps,
+			body: map[string]interface{}{"messages": []interface{}{map[string]interface{}{"role": "user", "content": imageContent}}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before, _ := json.Marshal(tt.body)
+			got := applyModelCapabilities(tt.body, tt.caps, func(string, ...any) {
+				t.Error("unexpected log")
+			})
+			if got != 0 {
+				t.Fatalf("stripped = %d, want 0", got)
+			}
+			after, _ := json.Marshal(tt.body)
+			if !bytes.Equal(before, after) {
+				t.Fatalf("body changed:\n got: %s\nwant: %s", after, before)
+			}
+		})
+	}
+}
+
+// TestLoggingTransportModelCapabilities verifies the transport strips images
+// before remapping the model, so capabilities key on the client-facing id.
+func TestLoggingTransportModelCapabilities(t *testing.T) {
+	body := map[string]interface{}{
+		"model": "claude-haiku-5",
+		"messages": []interface{}{
+			map[string]interface{}{
+				"role": "user",
+				"content": []interface{}{
+					map[string]interface{}{"type": "image", "source": map[string]interface{}{"type": "base64", "media_type": "image/png", "data": "iVBOR"}},
+					map[string]interface{}{"type": "text", "text": "what is this?"},
+				},
+			},
+		},
+	}
+	bodyBytes, _ := json.Marshal(body)
+	req := httptest.NewRequest("POST", "/v1/messages", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+
+	mockRT := &mockRoundTripper{t: t, statusCode: http.StatusOK}
+	transport := &loggingTransport{
+		modelMap:          map[string]string{"claude-haiku-5": "deepseek/deepseek-v4-flash-0731"},
+		modelCapabilities: map[string]ModelCapability{"claude-haiku-5": CapNoImage},
+		Transport:         mockRT,
+	}
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	var data map[string]interface{}
+	if err := json.Unmarshal(mockRT.body, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data["model"] != "deepseek/deepseek-v4-flash-0731" {
+		t.Errorf("model = %v, want remapped model", data["model"])
+	}
+	content := data["messages"].([]interface{})[0].(map[string]interface{})["content"].([]interface{})
+	part := content[0].(map[string]interface{})
+	if part["type"] != "text" || !strings.Contains(part["text"].(string), "image omitted") {
+		t.Errorf("image part = %v, want text note", part)
+	}
+	if raw := string(mockRT.body); strings.Contains(raw, `"type":"image"`) || strings.Contains(raw, "iVBOR") {
+		t.Errorf("image data leaked upstream: %s", raw)
+	}
+}
+
+// TestLoggingTransportModelCapabilitiesNoImagesUnchanged verifies a flagged
+// model with a text-only request is forwarded byte-for-byte.
+func TestLoggingTransportModelCapabilitiesNoImagesUnchanged(t *testing.T) {
+	body := map[string]interface{}{
+		"model":    "claude-haiku-5",
+		"messages": []interface{}{map[string]interface{}{"role": "user", "content": "hi"}},
+	}
+	bodyBytes, _ := json.Marshal(body)
+	req := httptest.NewRequest("POST", "/v1/messages", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+
+	mockRT := &mockRoundTripper{t: t, statusCode: http.StatusOK}
+	transport := &loggingTransport{
+		modelCapabilities: map[string]ModelCapability{"claude-haiku-5": CapNoImage},
+		Transport:         mockRT,
+	}
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	if !bytes.Equal(mockRT.body, bodyBytes) {
+		t.Fatalf("body changed:\n got: %s\nwant: %s", mockRT.body, bodyBytes)
+	}
+}
+
+func TestHandleRejectsInvalidModelCapability(t *testing.T) {
+	err := Handle([]string{"--model-capability", "claude-haiku-5=no-vision", "--base-url", "https://example.test"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), `unknown option "no-vision"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

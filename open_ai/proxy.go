@@ -40,6 +40,7 @@ type proxyOptions struct {
 	codexTransform              bool
 	feedToGrokCLI               bool
 	codexAuthFile               string
+	modelCapabilities           map[string]ModelCapability
 }
 
 func newProxyWithOptions(target *url.URL, modelMap map[string]string, verbose bool, opts proxyOptions) *httputil.ReverseProxy {
@@ -66,6 +67,7 @@ func newProxyWithOptions(target *url.URL, modelMap map[string]string, verbose bo
 		codexTransform:          opts.codexTransform,
 		feedToGrokCLI:           opts.feedToGrokCLI,
 		codexAuthFile:           opts.codexAuthFile,
+		modelCapabilities:       opts.modelCapabilities,
 		verbose:                 verbose,
 	}
 
@@ -107,6 +109,7 @@ type loggingTransport struct {
 	codexTransform          bool
 	feedToGrokCLI           bool
 	codexAuthFile           string
+	modelCapabilities       map[string]ModelCapability
 	verbose                 bool
 	Transport               http.RoundTripper
 }
@@ -180,6 +183,11 @@ func (c *loggingTransport) modifyRequestBody(req *http.Request, body []byte) {
 	changed := false
 	if c.codexTransform {
 		transformCodexRequest(data, c.logf)
+		changed = true
+	}
+	// Capability limits key on the client-facing model id, so apply them
+	// before the --model remap rewrites data["model"].
+	if applyModelCapabilities(data, c.modelCapabilities, c.logf) > 0 {
 		changed = true
 	}
 	if model, ok := data["model"].(string); ok {

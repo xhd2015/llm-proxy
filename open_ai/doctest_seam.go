@@ -28,3 +28,15 @@ func TransformCodexRequest(data map[string]interface{}, logf func(format string,
 func ReadCodexAuth(path string) (accessToken string, accountID string, err error) {
 	return readCodexAuth(path)
 }
+
+// ParseModelCapabilities delegates to the unexported parseModelCapabilities so
+// the doctest harness can exercise --model-capability flag parsing.
+func ParseModelCapabilities(entries []string) (map[string]ModelCapability, error) {
+	return parseModelCapabilities(entries)
+}
+
+// ApplyModelCapabilities delegates to the unexported applyModelCapabilities so
+// the doctest harness can exercise image stripping on decoded request bodies.
+func ApplyModelCapabilities(data map[string]interface{}, caps map[string]ModelCapability, logf func(format string, args ...any)) int {
+	return applyModelCapabilities(data, caps, logf)
+}

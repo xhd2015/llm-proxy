@@ -24,6 +24,10 @@ Usage: llm-proxy [OPTIONS]
 Options:
   --base-url URL                   base url to proxy
   --model FROM=TO                  remapping models, can be repeated
+  --model-capability MODEL=opt1,opt2
+                                   declare per-model capability limits, can be repeated;
+                                   opts: no-image (strip image blocks, replace with a text
+                                   note so the model still answers on text)
   --port PORT                      port to listen on (default: 8080)
   --filter-text-snapshot           filter text snapshot in streaming response:
                                    e.g. {"type":"text","text":" tool...", "snapshot":"A tool..."}
@@ -71,6 +75,7 @@ func Handle(args []string) error {
 	var showUsages bool
 	var baseUrl string
 	var modelMappings []string
+	var modelCapabilityEntries []string
 	var port string
 	var logFile string
 	var filterTextSnapshot bool
@@ -78,6 +83,7 @@ func Handle(args []string) error {
 	var feedToGrokCLI bool
 	args, err := flags.String("--base-url", &baseUrl).
 		StringSlice("--model", &modelMappings).
+		StringSlice("--model-capability", &modelCapabilityEntries).
 		String("--port", &port).
 		String("--log", &logFile).
 		Bool("--filter-text-snapshot", &filterTextSnapshot).
@@ -98,6 +104,10 @@ func Handle(args []string) error {
 	if feedToGrokCLI && !codex {
 		return fmt.Errorf("--feed-to-grok-cli requires --codex")
 	}
+	modelCaps, err := parseModelCapabilities(modelCapabilityEntries)
+	if err != nil {
+		return err
+	}
 	if showUsages {
 		return HandleUsages(args)
 	}
@@ -105,10 +115,10 @@ func Handle(args []string) error {
 		return fmt.Errorf("unrecognized extra args: %s", strings.Join(args, " "))
 	}
 	if openAI {
-		return StartAPIProxy(baseUrl, modelMappings, port, verbose, logFile)
+		return StartAPIProxy(baseUrl, modelMappings, port, verbose, logFile, modelCaps)
 	}
 	if codex {
-		return startCodexProxy(baseUrl, modelMappings, port, verbose, logFile, feedToGrokCLI)
+		return startCodexProxy(baseUrl, modelMappings, port, verbose, logFile, feedToGrokCLI, modelCaps)
 	}
 	if baseUrl == "" {
 		return fmt.Errorf("missing --base-url")
@@ -139,6 +149,7 @@ func Handle(args []string) error {
 		filterTextSnapshot:      filterTextSnapshot,
 		normalizeAnthropicUsage: normalizeAnthropicUsage,
 		fullLogger:              fullLogger,
+		modelCapabilities:       modelCaps,
 	})
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -153,7 +164,7 @@ func Handle(args []string) error {
 	return http.ListenAndServe(addr, nil)
 }
 
-func StartAPIProxy(baseUrl string, modelMappings []string, port string, verbose bool, logFile string) error {
+func StartAPIProxy(baseUrl string, modelMappings []string, port string, verbose bool, logFile string, modelCaps map[string]ModelCapability) error {
 	if baseUrl == "" {
 		baseUrl = "https://api.openai.com"
 	}
@@ -180,8 +191,9 @@ func StartAPIProxy(baseUrl string, modelMappings []string, port string, verbose 
 	}
 
 	proxy := newProxyWithOptions(target, modelMap, verbose, proxyOptions{
-		usageLogFile: usageLogFile,
-		fullLogger:   fullLogger,
+		usageLogFile:      usageLogFile,
+		fullLogger:        fullLogger,
+		modelCapabilities: modelCaps,
 	})
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
