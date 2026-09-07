@@ -70,6 +70,10 @@ func startCodexProxy(baseUrl string, modelMappings []string, port string, verbos
 	addr := "localhost:" + port
 	endpoint := fmt.Sprintf("http://%s/v1", addr)
 	handler := newCodexProxyHandler(proxy, feedToGrokCLI, codexModelsCachePath(), endpoint)
+	sampleContextWindow, sampleContextWindowErr := readCodexContextWindow(codexModelsCachePath(), "gpt-5.5")
+	if sampleContextWindowErr != nil {
+		log.Printf("Grok CLI sample config context window unavailable: %v", sampleContextWindowErr)
+	}
 	http.HandleFunc("/", handler.ServeHTTP)
 
 	log.Printf("Codex OAuth proxy running at %s", endpoint)
@@ -92,7 +96,9 @@ func startCodexProxy(baseUrl string, modelMappings []string, port string, verbos
 	fmt.Printf("  base_url = \"%s\"\n", endpoint)
 	fmt.Printf("  name = \"Codex Subscription (GPT-5.5)\"\n")
 	fmt.Printf("  api_backend = \"responses\"\n")
-	fmt.Printf("  context_window = 200000\n")
+	if sampleContextWindowErr == nil {
+		fmt.Printf("  context_window = %d\n", sampleContextWindow)
+	}
 	fmt.Printf("\n  # Auth is injected automatically from ~/.codex/auth.json.\n")
 	fmt.Printf("\n  # Generate config blocks for all Codex models:\n")
 	fmt.Printf("  llm-proxy codex-models\n")
