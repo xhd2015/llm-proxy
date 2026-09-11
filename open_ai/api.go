@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/xhd2015/less-gen/flags"
+	"github.com/xhd2015/llm-proxy/capture"
+	"github.com/xhd2015/llm-proxy/commandcode"
 	logutil "github.com/xhd2015/llm-proxy/log"
 )
 
@@ -46,12 +48,26 @@ Options:
   --codex                          start a local proxy to Codex's ChatGPT OAuth backend
   --feed-to-grok-cli               drop incompatible Codex keepalive stream events for Grok CLI
   --usages                         show usage summary from the usage log
+  --proxy-commandcode              serve an Anthropic Messages proxy backed by your
+                                   Command Code subscription (for Grok CLI custom models)
+  --commandcode-home DIR           Command Code config dir holding auth.json
+                                   (default: ~/.commandcode)
+  --commandcode-version VER        X-Command-Code-Version sent upstream
+                                   (default: 1.53.0)
   codex-models                    print grok config.toml blocks for all Codex models
+  commandcode-models              print grok config.toml blocks for all Command Code models
 
 Examples:
    llm-proxy --base-url http://localhost:8081 --model model-alias=actual-model
 
    llm-proxy doc
+
+   llm-proxy capture --env-commandcode cmd-xhd2015 -p "hello" --yolo --skip-onboarding
+
+   llm-proxy --proxy-commandcode --port 8892
+
+Run llm-proxy capture --help for capture options.
+Run llm-proxy commandcode-models --help for Command Code model config.
 `
 
 type usageRecord struct {
@@ -73,6 +89,10 @@ func Handle(args []string) error {
 			return handleDoc(args[1:])
 		case "codex-models":
 			return handleCodexModels(args[1:])
+		case "capture":
+			return capture.Handle(args[1:])
+		case "commandcode-models":
+			return handleCommandCodeModels(args[1:])
 		}
 	}
 	var verbose bool
@@ -88,6 +108,9 @@ func Handle(args []string) error {
 	var filterTextSnapshot bool
 	var normalizeAnthropicUsage bool
 	var feedToGrokCLI bool
+	var proxyCommandCode bool
+	var commandCodeHome string
+	var commandCodeVersion string
 	var colorFlag *bool
 	var noColorFlag *bool
 	args, err := flags.String("--base-url", &baseUrl).
@@ -99,6 +122,9 @@ func Handle(args []string) error {
 		Bool("--filter-text-snapshot", &filterTextSnapshot).
 		Bool("--normalize-anthropic-usage", &normalizeAnthropicUsage).
 		Bool("--feed-to-grok-cli", &feedToGrokCLI).
+		Bool("--proxy-commandcode", &proxyCommandCode).
+		String("--commandcode-home", &commandCodeHome).
+		String("--commandcode-version", &commandCodeVersion).
 		Bool("--color", &colorFlag).
 		Bool("--no-color", &noColorFlag).
 		Bool("-v,--verbose", &verbose).
@@ -115,6 +141,12 @@ func Handle(args []string) error {
 	}
 	if feedToGrokCLI && !codex {
 		return fmt.Errorf("--feed-to-grok-cli requires --codex")
+	}
+	if proxyCommandCode && (openAI || codex || baseUrl != "") {
+		return fmt.Errorf("--proxy-commandcode cannot be combined with --open-ai, --codex, or --base-url")
+	}
+	if !proxyCommandCode && (commandCodeHome != "" || commandCodeVersion != "") {
+		return fmt.Errorf("--commandcode-home and --commandcode-version require --proxy-commandcode")
 	}
 	colorMode, err := colorModeFromFlags(colorFlag, noColorFlag)
 	if err != nil {
@@ -144,6 +176,26 @@ func Handle(args []string) error {
 	}
 	if codex {
 		return startCodexProxy(baseUrl, modelMappings, port, verbose, logFile, feedToGrokCLI, modelCaps, colorEnabled)
+	}
+	if proxyCommandCode {
+		ccPort, err := commandCodePortNumber(port)
+		if err != nil {
+			return err
+		}
+		fullLogger, closeFullLogger, err := logutil.OpenAppend(logFile)
+		if err != nil {
+			return err
+		}
+		if closeFullLogger != nil {
+			defer closeFullLogger.Close()
+		}
+		return commandcode.Start(commandcode.Options{
+			Home:    commandCodeHome,
+			Version: commandCodeVersion,
+			Port:    ccPort,
+			Verbose: verbose,
+			Logger:  fullLogger,
+		})
 	}
 	if baseUrl == "" {
 		return fmt.Errorf("missing --base-url")

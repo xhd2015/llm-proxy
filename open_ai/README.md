@@ -65,6 +65,53 @@ Result:
 I'm opencode, an interactive CLI tool that helps with software engineering tasks. I can help you write code, debug issues, run commands, search through codebases, and manage development workflows.
 ```
 
+# Command Code subscription proxy
+
+`--proxy-commandcode` serves an Anthropic Messages API on loopback backed by your
+Command Code subscription, so clients such as Grok CLI can use Command Code models
+without running the `cmd` binary:
+
+```sh
+llm-proxy --proxy-commandcode --port 8892
+```
+
+Credentials are read from `~/.commandcode/auth.json` on every request, so a rotated
+API key is picked up without a restart. Pass `--commandcode-home DIR` to read them
+from elsewhere (for example the `cmd-xhd2015` sandbox) and
+`--commandcode-version VER` if Command Code raises its minimum client version.
+
+Generate the matching `~/.grok/config.toml` model blocks:
+
+```sh
+llm-proxy commandcode-models >> ~/.grok/config.toml
+grok -m cc-deepseek-v4-flash -p "hello" --always-approve
+```
+
+The proxy uses the `messages` (Anthropic) backend because Command Code's wire
+format already uses Anthropic-shaped content blocks and `input_schema` tools. It
+also serves `GET /v1/models-v2` so Grok can refresh model context windows.
+
+Note this routes your real Command Code subscription and consumes its quota/credits;
+Command Code's own plan gating still applies, so the usable model list is whatever
+your plan allows.
+
+# Capture Command Code traffic
+
+`capture` runs a command with Command Code redirected to a local capture server
+and records every HTTP exchange (request + response) as JSONL:
+
+```sh
+llm-proxy capture --env-commandcode cmd-xhd2015 -p "hello" --yolo --skip-onboarding
+```
+
+The capture is written to `/tmp/llm-proxy-capture.jsonl` by default; pass
+`-o FILE` (must end with `.jsonl`) to change it. Sensitive headers such as
+`Authorization` are redacted unless `--no-redact` is given.
+
+Responses are mocked, so the wrapped command finishes cleanly while the real
+outgoing requests are logged. The general HTTP/HTTPS proxy capture mode is not
+implemented yet, so `--env-commandcode` is currently required.
+
 # Codex ChatGPT/OAuth proxy
 
 Use `--codex` when Codex is signed in with ChatGPT/OAuth and you want to route Codex traffic through llm-proxy:
