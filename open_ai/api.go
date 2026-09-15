@@ -54,6 +54,9 @@ Options:
                                    (default: ~/.commandcode)
   --commandcode-version VER        X-Command-Code-Version sent upstream
                                    (default: 1.53.0)
+  --no-coalesce-thinking           flush every Command Code reasoning-delta
+                                   (default: coalesce when the client sends
+                                   thinking.display=summarized)
   codex-models                    print grok config.toml blocks for all Codex models
   commandcode-models              print grok config.toml blocks for all Command Code models
 
@@ -111,6 +114,7 @@ func Handle(args []string) error {
 	var proxyCommandCode bool
 	var commandCodeHome string
 	var commandCodeVersion string
+	var noCoalesceThinking bool
 	var colorFlag *bool
 	var noColorFlag *bool
 	args, err := flags.String("--base-url", &baseUrl).
@@ -125,6 +129,7 @@ func Handle(args []string) error {
 		Bool("--proxy-commandcode", &proxyCommandCode).
 		String("--commandcode-home", &commandCodeHome).
 		String("--commandcode-version", &commandCodeVersion).
+		Bool("--no-coalesce-thinking", &noCoalesceThinking).
 		Bool("--color", &colorFlag).
 		Bool("--no-color", &noColorFlag).
 		Bool("-v,--verbose", &verbose).
@@ -147,6 +152,9 @@ func Handle(args []string) error {
 	}
 	if !proxyCommandCode && (commandCodeHome != "" || commandCodeVersion != "") {
 		return fmt.Errorf("--commandcode-home and --commandcode-version require --proxy-commandcode")
+	}
+	if noCoalesceThinking && !proxyCommandCode {
+		return fmt.Errorf("--no-coalesce-thinking requires --proxy-commandcode")
 	}
 	colorMode, err := colorModeFromFlags(colorFlag, noColorFlag)
 	if err != nil {
@@ -189,12 +197,16 @@ func Handle(args []string) error {
 		if closeFullLogger != nil {
 			defer closeFullLogger.Close()
 		}
+		if noCoalesceThinking {
+			fmt.Fprintln(os.Stderr, grayNotice(colorEnabled, "thinking_delta coalescing disabled"))
+		}
 		return commandcode.Start(commandcode.Options{
-			Home:    commandCodeHome,
-			Version: commandCodeVersion,
-			Port:    ccPort,
-			Verbose: verbose,
-			Logger:  fullLogger,
+			Home:               commandCodeHome,
+			Version:            commandCodeVersion,
+			Port:               ccPort,
+			Verbose:            verbose,
+			Logger:             fullLogger,
+			NoCoalesceThinking: noCoalesceThinking,
 		})
 	}
 	if baseUrl == "" {

@@ -11,7 +11,14 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 )
+
+// thinkingFlushRunes is how many runes to buffer before emitting a coalesced
+// thinking_delta. Grok's native summarized path is tens of updates per thought;
+// Command Code streams token-sized deltas, so this cap keeps the TUI cadence
+// similar without splitting a single oversized delta.
+const thinkingFlushRunes = 80
 
 // alphaSink consumes decoded /alpha/generate stream parts. Text, thinking, and
 // tool-call parts are delivered in arrival order; finished is called exactly once.
@@ -172,18 +179,25 @@ type sseSink struct {
 	// clients require the field on the block itself as well as in the delta.
 	thinkingSig string
 	openTools   map[string]int
+
+	// coalesceThinking buffers reasoning-deltas until thinkingFlushRunes or the
+	// thinking block closes. Used when the client sent display=summarized.
+	coalesceThinking bool
+	thinkingBuf      strings.Builder
+	thinkingRunes    int
 }
 
-func newSSESink(w http.ResponseWriter, model, msgID string) *sseSink {
+func newSSESink(w http.ResponseWriter, model, msgID string, coalesceThinking bool) *sseSink {
 	flusher, _ := w.(http.Flusher)
 	return &sseSink{
-		w:            w,
-		flusher:      flusher,
-		model:        model,
-		msgID:        msgID,
-		openText:     -1,
-		openThinking: -1,
-		openTools:    map[string]int{},
+		w:                w,
+		flusher:          flusher,
+		model:            model,
+		msgID:            msgID,
+		openText:         -1,
+		openThinking:     -1,
+		openTools:        map[string]int{},
+		coalesceThinking: coalesceThinking,
 	}
 }
 
@@ -233,6 +247,27 @@ func (s *sseSink) closeText() error {
 	})
 }
 
+func (s *sseSink) emitThinkingDelta(text string) error {
+	if text == "" {
+		return nil
+	}
+	return s.event("content_block_delta", map[string]any{
+		"type":  "content_block_delta",
+		"index": s.openThinking,
+		"delta": map[string]any{"type": "thinking_delta", "thinking": text},
+	})
+}
+
+func (s *sseSink) flushThinkingDelta() error {
+	if s.thinkingBuf.Len() == 0 {
+		return nil
+	}
+	text := s.thinkingBuf.String()
+	s.thinkingBuf.Reset()
+	s.thinkingRunes = 0
+	return s.emitThinkingDelta(text)
+}
+
 // closeThinking emits the signature_delta Anthropic requires inside a thinking
 // block, then stops the block. Command Code returns no signature, so a random
 // one is synthesized; since we translate thinking back to plain reasoning text
@@ -240,6 +275,9 @@ func (s *sseSink) closeText() error {
 func (s *sseSink) closeThinking() error {
 	if s.openThinking < 0 {
 		return nil
+	}
+	if err := s.flushThinkingDelta(); err != nil {
+		return err
 	}
 	index := s.openThinking
 	s.openThinking = -1
@@ -293,11 +331,15 @@ func (s *sseSink) thinkingDelta(_, text string) error {
 	if err := s.openThinkingBlock(); err != nil {
 		return err
 	}
-	return s.event("content_block_delta", map[string]any{
-		"type":  "content_block_delta",
-		"index": s.openThinking,
-		"delta": map[string]any{"type": "thinking_delta", "thinking": text},
-	})
+	if !s.coalesceThinking {
+		return s.emitThinkingDelta(text)
+	}
+	s.thinkingBuf.WriteString(text)
+	s.thinkingRunes += utf8.RuneCountInString(text)
+	if s.thinkingRunes >= thinkingFlushRunes {
+		return s.flushThinkingDelta()
+	}
+	return nil
 }
 
 func (s *sseSink) thinkingEnd(string) error {

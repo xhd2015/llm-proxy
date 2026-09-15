@@ -72,12 +72,45 @@ func parseSSE(t *testing.T, body string) []sseEvent {
 
 func collectSSE(t *testing.T, transcript string) []sseEvent {
 	t.Helper()
+	return collectSSECoalesce(t, transcript, false)
+}
+
+func collectSSECoalesce(t *testing.T, transcript string, coalesce bool) []sseEvent {
+	t.Helper()
 	rec := httptest.NewRecorder()
-	sink := newSSESink(rec, "test-model", "msg_test")
+	sink := newSSESink(rec, "test-model", "msg_test", coalesce)
 	if err := decodeAlpha(strings.NewReader(transcript), sink); err != nil {
 		t.Fatalf("decodeAlpha: %v", err)
 	}
 	return parseSSE(t, rec.Body.String())
+}
+
+func thinkingDeltaCountAndText(events []sseEvent) (int, string) {
+	var n int
+	var text string
+	for _, ev := range events {
+		if ev.Event != "content_block_delta" {
+			continue
+		}
+		delta, _ := ev.Data["delta"].(map[string]any)
+		if delta["type"] != "thinking_delta" {
+			continue
+		}
+		n++
+		text += delta["thinking"].(string)
+	}
+	return n, text
+}
+
+func manyReasoningDeltas(n int) string {
+	var b strings.Builder
+	b.WriteString(`{"type":"reasoning-start","id":"r0"}` + "\n")
+	for i := 0; i < n; i++ {
+		b.WriteString(`{"type":"reasoning-delta","id":"r0","text":"x"}` + "\n")
+	}
+	b.WriteString(`{"type":"reasoning-end","id":"r0"}` + "\n")
+	b.WriteString(`{"type":"finish","finishReason":"stop","totalUsage":{"inputTokens":1,"outputTokens":1}}` + "\n")
+	return b.String()
 }
 
 // blockEvents maps the SSE stream into a compact (event, type, index) view for
@@ -330,5 +363,44 @@ func TestMessageSinkBuildsAnthropicMessage(t *testing.T) {
 	usage := msg["usage"].(map[string]any)
 	if usage["input_tokens"] != 7859 || usage["output_tokens"] != 71 {
 		t.Errorf("usage = %v", usage)
+	}
+}
+
+func TestCoalesceThinkingDeltasReducesEventCount(t *testing.T) {
+	const n = 200
+	events := collectSSECoalesce(t, manyReasoningDeltas(n), true)
+	gotN, text := thinkingDeltaCountAndText(events)
+	wantText := strings.Repeat("x", n)
+	if text != wantText {
+		t.Errorf("thinking text len = %d, want %d", len(text), len(wantText))
+	}
+	wantN := (n + thinkingFlushRunes - 1) / thinkingFlushRunes
+	if gotN != wantN {
+		t.Errorf("thinking_delta count = %d, want %d", gotN, wantN)
+	}
+}
+
+func TestCoalesceThinkingOffKeepsOneDeltaPerToken(t *testing.T) {
+	const n = 200
+	events := collectSSECoalesce(t, manyReasoningDeltas(n), false)
+	gotN, text := thinkingDeltaCountAndText(events)
+	if text != strings.Repeat("x", n) {
+		t.Errorf("thinking text len = %d, want %d", len(text), n)
+	}
+	if gotN != n {
+		t.Errorf("thinking_delta count = %d, want %d", gotN, n)
+	}
+}
+
+func TestCoalesceThinkingPreservesInterleaveOrder(t *testing.T) {
+	events := collectSSECoalesce(t, realTranscript, true)
+	got := blockEvents(events)
+	want := []string{"start:thinking", "stop", "start:text", "stop", "start:tool_use", "stop"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("block order = %v, want %v", got, want)
+	}
+	_, thinking := thinkingDeltaCountAndText(events)
+	if thinking != "The" {
+		t.Errorf("thinking = %q, want %q", thinking, "The")
 	}
 }

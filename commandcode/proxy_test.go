@@ -51,14 +51,22 @@ func newTestProxy(t *testing.T, upstreamURL string) *httptest.Server {
 
 func newTestProxyVerbose(t *testing.T, upstreamURL string, verbose bool) *httptest.Server {
 	t.Helper()
+	return newTestProxyOpts(t, upstreamURL, Options{Verbose: verbose})
+}
+
+func newTestProxyOpts(t *testing.T, upstreamURL string, opts Options) *httptest.Server {
+	t.Helper()
+	if opts.Version == "" {
+		opts.Version = "1.53.0"
+	}
 	h := &handler{
 		client: &Client{
 			BaseURL: upstreamURL,
 			Home:    writeAuth(t, `{"apiKey":"user_test","userName":"tester"}`),
-			Version: "1.53.0",
+			Version: opts.Version,
 			HTTP:    http.DefaultClient,
 		},
-		opts:     Options{Version: "1.53.0", Verbose: verbose},
+		opts:     opts,
 		endpoint: "http://localhost:8892/v1",
 	}
 	srv := httptest.NewServer(h.routes())
@@ -401,5 +409,51 @@ func TestProxyCountTokens(t *testing.T) {
 	}
 	if payload["input_tokens"] != float64(100) {
 		t.Errorf("input_tokens = %v, want 100", payload["input_tokens"])
+	}
+}
+
+func TestProxyCoalescesThinkingWhenDisplaySummarized(t *testing.T) {
+	const n = 200
+	_, upstream := newUpstream(t, http.StatusOK, manyReasoningDeltas(n))
+	proxy := newTestProxy(t, upstream.URL)
+
+	resp, body := postMessages(t, proxy.URL, `{"model":"m","stream":true,"thinking":{"type":"adaptive","display":"summarized"},"messages":[{"role":"user","content":"hi"}]}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	gotN, text := thinkingDeltaCountAndText(parseSSE(t, body))
+	if text != strings.Repeat("x", n) {
+		t.Errorf("thinking text len = %d, want %d", len(text), n)
+	}
+	wantN := (n + thinkingFlushRunes - 1) / thinkingFlushRunes
+	if gotN != wantN {
+		t.Errorf("thinking_delta count = %d, want %d", gotN, wantN)
+	}
+}
+
+func TestProxyDoesNotCoalesceThinkingWithoutSummarizedDisplay(t *testing.T) {
+	const n = 200
+	_, upstream := newUpstream(t, http.StatusOK, manyReasoningDeltas(n))
+	proxy := newTestProxy(t, upstream.URL)
+
+	_, body := postMessages(t, proxy.URL, `{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	gotN, text := thinkingDeltaCountAndText(parseSSE(t, body))
+	if text != strings.Repeat("x", n) {
+		t.Errorf("thinking text len = %d, want %d", len(text), n)
+	}
+	if gotN != n {
+		t.Errorf("thinking_delta count = %d, want %d (no coalesce without display=summarized)", gotN, n)
+	}
+}
+
+func TestProxyNoCoalesceThinkingOption(t *testing.T) {
+	const n = 200
+	_, upstream := newUpstream(t, http.StatusOK, manyReasoningDeltas(n))
+	proxy := newTestProxyOpts(t, upstream.URL, Options{NoCoalesceThinking: true})
+
+	_, body := postMessages(t, proxy.URL, `{"model":"m","stream":true,"thinking":{"type":"adaptive","display":"summarized"},"messages":[{"role":"user","content":"hi"}]}`)
+	gotN, _ := thinkingDeltaCountAndText(parseSSE(t, body))
+	if gotN != n {
+		t.Errorf("thinking_delta count = %d, want %d when NoCoalesceThinking is set", gotN, n)
 	}
 }

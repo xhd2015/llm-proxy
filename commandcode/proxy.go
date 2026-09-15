@@ -27,6 +27,9 @@ type Options struct {
 	HTTP *http.Client
 	// Logger receives full request logs when set.
 	Logger *logutil.Logger
+	// NoCoalesceThinking flushes every Command Code reasoning-delta, even when
+	// the client sent thinking.display=summarized.
+	NoCoalesceThinking bool
 }
 
 // Start validates credentials and serves the proxy until the process stops.
@@ -188,7 +191,8 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 
-	if err := decodeAlpha(resp.Body, newSSESink(w, req.Model, msgID)); err != nil {
+	sink := newSSESink(w, req.Model, msgID, coalesceThinkingDeltas(req.Thinking, h.opts.NoCoalesceThinking))
+	if err := decodeAlpha(resp.Body, sink); err != nil {
 		h.logf("Stream error: %v", err)
 		writeAnthropicStreamError(w, "api_error", err.Error())
 		return

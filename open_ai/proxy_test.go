@@ -142,6 +142,16 @@ func TestHandleRejectsGrokCLICompatibilityWithoutCodex(t *testing.T) {
 	}
 }
 
+func TestHandleRejectsNoCoalesceThinkingWithoutCommandCode(t *testing.T) {
+	err := Handle([]string{"--no-coalesce-thinking", "--base-url", "https://example.test"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "--no-coalesce-thinking requires --proxy-commandcode") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestNormalizeStreamingResponseAnthropicUsage(t *testing.T) {
 	body := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"cache_creation_input_tokens\":null,\"cache_read_input_tokens\":null}}}\n\n")
 
