@@ -15,9 +15,9 @@ import (
 )
 
 // thinkingFlushRunes is how many runes to buffer before emitting a coalesced
-// thinking_delta. Grok's native summarized path is tens of updates per thought;
-// Command Code streams token-sized deltas, so this cap keeps the TUI cadence
-// similar without splitting a single oversized delta.
+// thinking_delta or text_delta. Grok's native summarized path is tens of
+// updates per thought; Command Code streams token-sized deltas, so this cap
+// keeps the TUI cadence similar without splitting a single oversized delta.
 const thinkingFlushRunes = 80
 
 // alphaSink consumes decoded /alpha/generate stream parts. Text, thinking, and
@@ -180,24 +180,26 @@ type sseSink struct {
 	thinkingSig string
 	openTools   map[string]int
 
-	// coalesceThinking buffers reasoning-deltas until thinkingFlushRunes or the
-	// thinking block closes. Used when the client sent display=summarized.
-	coalesceThinking bool
-	thinkingBuf      strings.Builder
-	thinkingRunes    int
+	// coalesce buffers thinking_delta and text_delta until thinkingFlushRunes
+	// or the open block closes. Used when the client sent display=summarized.
+	coalesce      bool
+	thinkingBuf   strings.Builder
+	thinkingRunes int
+	textBuf       strings.Builder
+	textRunes     int
 }
 
-func newSSESink(w http.ResponseWriter, model, msgID string, coalesceThinking bool) *sseSink {
+func newSSESink(w http.ResponseWriter, model, msgID string, coalesce bool) *sseSink {
 	flusher, _ := w.(http.Flusher)
 	return &sseSink{
-		w:                w,
-		flusher:          flusher,
-		model:            model,
-		msgID:            msgID,
-		openText:         -1,
-		openThinking:     -1,
-		openTools:        map[string]int{},
-		coalesceThinking: coalesceThinking,
+		w:            w,
+		flusher:      flusher,
+		model:        model,
+		msgID:        msgID,
+		openText:     -1,
+		openThinking: -1,
+		openTools:    map[string]int{},
+		coalesce:     coalesce,
 	}
 }
 
@@ -235,9 +237,33 @@ func (s *sseSink) ensureStarted() error {
 	})
 }
 
+func (s *sseSink) emitTextDelta(text string) error {
+	if text == "" {
+		return nil
+	}
+	return s.event("content_block_delta", map[string]any{
+		"type":  "content_block_delta",
+		"index": s.openText,
+		"delta": map[string]any{"type": "text_delta", "text": text},
+	})
+}
+
+func (s *sseSink) flushTextDelta() error {
+	if s.textBuf.Len() == 0 {
+		return nil
+	}
+	text := s.textBuf.String()
+	s.textBuf.Reset()
+	s.textRunes = 0
+	return s.emitTextDelta(text)
+}
+
 func (s *sseSink) closeText() error {
 	if s.openText < 0 {
 		return nil
+	}
+	if err := s.flushTextDelta(); err != nil {
+		return err
 	}
 	index := s.openText
 	s.openText = -1
@@ -331,7 +357,7 @@ func (s *sseSink) thinkingDelta(_, text string) error {
 	if err := s.openThinkingBlock(); err != nil {
 		return err
 	}
-	if !s.coalesceThinking {
+	if !s.coalesce {
 		return s.emitThinkingDelta(text)
 	}
 	s.thinkingBuf.WriteString(text)
@@ -364,11 +390,15 @@ func (s *sseSink) textDelta(text string) error {
 			return err
 		}
 	}
-	return s.event("content_block_delta", map[string]any{
-		"type":  "content_block_delta",
-		"index": s.openText,
-		"delta": map[string]any{"type": "text_delta", "text": text},
-	})
+	if !s.coalesce {
+		return s.emitTextDelta(text)
+	}
+	s.textBuf.WriteString(text)
+	s.textRunes += utf8.RuneCountInString(text)
+	if s.textRunes >= thinkingFlushRunes {
+		return s.flushTextDelta()
+	}
+	return nil
 }
 
 // toolStart closes any open thinking/text block first: stream parts may overlap

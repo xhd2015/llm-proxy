@@ -19,7 +19,7 @@ type MessagesRequest struct {
 	Stream    bool            `json:"stream"`
 	// Thinking is Grok/Anthropic thinking config. Command Code always reasons
 	// for models that support it; the proxy only reads display=summarized so it
-	// can coalesce token-level reasoning-deltas into fewer thinking_delta events.
+	// can coalesce token-level reasoning and text deltas.
 	Thinking json.RawMessage `json:"thinking"`
 }
 
@@ -42,8 +42,9 @@ func thinkingDisplaySummarized(raw json.RawMessage) bool {
 	return cfg.Display == "summarized"
 }
 
-// coalesceThinkingDeltas is true when the proxy should buffer reasoning-deltas.
-// --no-coalesce-thinking wins even if the client asked for summarized display.
+// coalesceThinkingDeltas is true when the proxy should buffer reasoning-deltas
+// and text-deltas. --no-coalesce-thinking wins even if the client asked for
+// summarized display.
 func coalesceThinkingDeltas(raw json.RawMessage, noCoalesce bool) bool {
 	return !noCoalesce && thinkingDisplaySummarized(raw)
 }

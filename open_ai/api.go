@@ -55,8 +55,8 @@ Options:
   --commandcode-version VER        X-Command-Code-Version sent upstream
                                    (default: 1.53.0)
   --no-coalesce-thinking           flush every Command Code reasoning-delta
-                                   (default: coalesce when the client sends
-                                   thinking.display=summarized)
+                                   and text-delta (default: coalesce both when
+                                   the client sends thinking.display=summarized)
   codex-models                    print grok config.toml blocks for all Codex models
   commandcode-models              print grok config.toml blocks for all Command Code models
 
@@ -198,7 +198,7 @@ func Handle(args []string) error {
 			defer closeFullLogger.Close()
 		}
 		if noCoalesceThinking {
-			fmt.Fprintln(os.Stderr, grayNotice(colorEnabled, "thinking_delta coalescing disabled"))
+			fmt.Fprintln(os.Stderr, grayNotice(colorEnabled, "thinking_delta and text_delta coalescing disabled"))
 		}
 		return commandcode.Start(commandcode.Options{
 			Home:               commandCodeHome,

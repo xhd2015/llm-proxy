@@ -457,3 +457,49 @@ func TestProxyNoCoalesceThinkingOption(t *testing.T) {
 		t.Errorf("thinking_delta count = %d, want %d when NoCoalesceThinking is set", gotN, n)
 	}
 }
+
+func TestProxyCoalescesTextWhenDisplaySummarized(t *testing.T) {
+	const n = 200
+	_, upstream := newUpstream(t, http.StatusOK, manyTextDeltas(n))
+	proxy := newTestProxy(t, upstream.URL)
+
+	resp, body := postMessages(t, proxy.URL, `{"model":"m","stream":true,"thinking":{"type":"adaptive","display":"summarized"},"messages":[{"role":"user","content":"hi"}]}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	gotN, text := textDeltaCountAndText(parseSSE(t, body))
+	if text != strings.Repeat("x", n) {
+		t.Errorf("text len = %d, want %d", len(text), n)
+	}
+	wantN := (n + thinkingFlushRunes - 1) / thinkingFlushRunes
+	if gotN != wantN {
+		t.Errorf("text_delta count = %d, want %d", gotN, wantN)
+	}
+}
+
+func TestProxyDoesNotCoalesceTextWithoutSummarizedDisplay(t *testing.T) {
+	const n = 200
+	_, upstream := newUpstream(t, http.StatusOK, manyTextDeltas(n))
+	proxy := newTestProxy(t, upstream.URL)
+
+	_, body := postMessages(t, proxy.URL, `{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	gotN, text := textDeltaCountAndText(parseSSE(t, body))
+	if text != strings.Repeat("x", n) {
+		t.Errorf("text len = %d, want %d", len(text), n)
+	}
+	if gotN != n {
+		t.Errorf("text_delta count = %d, want %d (no coalesce without display=summarized)", gotN, n)
+	}
+}
+
+func TestProxyNoCoalesceThinkingOptionLeavesTextUnbatched(t *testing.T) {
+	const n = 200
+	_, upstream := newUpstream(t, http.StatusOK, manyTextDeltas(n))
+	proxy := newTestProxyOpts(t, upstream.URL, Options{NoCoalesceThinking: true})
+
+	_, body := postMessages(t, proxy.URL, `{"model":"m","stream":true,"thinking":{"type":"adaptive","display":"summarized"},"messages":[{"role":"user","content":"hi"}]}`)
+	gotN, _ := textDeltaCountAndText(parseSSE(t, body))
+	if gotN != n {
+		t.Errorf("text_delta count = %d, want %d when NoCoalesceThinking is set", gotN, n)
+	}
+}

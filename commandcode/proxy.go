@@ -27,8 +27,8 @@ type Options struct {
 	HTTP *http.Client
 	// Logger receives full request logs when set.
 	Logger *logutil.Logger
-	// NoCoalesceThinking flushes every Command Code reasoning-delta, even when
-	// the client sent thinking.display=summarized.
+	// NoCoalesceThinking flushes every Command Code reasoning-delta and
+	// text-delta, even when the client sent thinking.display=summarized.
 	NoCoalesceThinking bool
 }
 

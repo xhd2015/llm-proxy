@@ -80,9 +80,9 @@ API key is picked up without a restart. Pass `--commandcode-home DIR` to read th
 from elsewhere (for example the `cmd-xhd2015` sandbox) and
 `--commandcode-version VER` if Command Code raises its minimum client version.
 When the client sends `thinking.display=summarized` (Grok CLI does), the proxy
-coalesces Command Code's token-level reasoning into fewer `thinking_delta`
-events so Grok's TUI is not redrawn on every token. Pass `--no-coalesce-thinking`
-to flush every reasoning-delta as before.
+coalesces Command Code's token-level reasoning and assistant text into fewer
+`thinking_delta` / `text_delta` events so Grok's TUI is not redrawn on every
+token. Pass `--no-coalesce-thinking` to flush every delta as before.
 
 Generate the matching `~/.grok/config.toml` model blocks:
 
