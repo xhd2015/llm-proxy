@@ -46,11 +46,13 @@ func TestConfigBlocks(t *testing.T) {
 		`base_url = "http://localhost:8892/v1"`,
 		`api_backend = "messages"`,
 		"context_window = 1000000",
-		`api_key = "llm-proxy-local"`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("ConfigBlocks output missing %q", want)
 		}
+	}
+	if strings.Contains(out, "api_key") {
+		t.Error("ConfigBlocks should not emit api_key")
 	}
 }
 

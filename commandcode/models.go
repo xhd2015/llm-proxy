@@ -43,11 +43,6 @@ func ModelsV2(endpoint string) modelsV2Response {
 	return response
 }
 
-// localAPIKey satisfies Grok's credential check for the loopback proxy, which
-// ignores inbound auth and uses the Command Code apiKey upstream. Without it,
-// Grok refuses to start unless XAI_API_KEY or a session token is present.
-const localAPIKey = "llm-proxy-local"
-
 // ConfigBlocks renders ready-to-paste [model.*] blocks for ~/.grok/config.toml,
 // mirroring `llm-proxy codex-models`.
 func ConfigBlocks(endpoint string) string {
@@ -63,7 +58,6 @@ func ConfigBlocks(endpoint string) string {
 		fmt.Fprintf(&out, "base_url = \"%s\"\n", endpoint)
 		fmt.Fprintf(&out, "name = \"%s\"\n", displayName(m))
 		fmt.Fprintf(&out, "api_backend = \"%s\"\n", apiBackend)
-		fmt.Fprintf(&out, "api_key = \"%s\"  # ignored by the loopback proxy\n", localAPIKey)
 		if m.ContextWindow > 0 {
 			fmt.Fprintf(&out, "context_window = %d\n", m.ContextWindow)
 		}
