@@ -13,14 +13,21 @@ import (
 // maxAlphaTokens is the ceiling Command Code accepts for params.max_tokens.
 const maxAlphaTokens = 64000
 
+const (
+	// effortDrop omits params.reasoning_effort when used as an effort-mapping actual.
+	effortDrop = "drop"
+	// effortInvalid rejects the client request: the model does not support that effort.
+	effortInvalid = "invalid"
+)
+
 // defaultSystem is sent when the client omits a system prompt. Command Code
 // otherwise injects its own large agent persona, which would override the
 // caller's intent, so a neutral replacement is always sent.
 const defaultSystem = "You are a helpful assistant. Follow the user's instructions and use the provided tools when needed."
 
 // buildRequest translates an Anthropic Messages request into a Command Code
-// /alpha/generate body.
-func buildRequest(req *MessagesRequest) (*alphaRequest, error) {
+// /alpha/generate body. effortByModel is keyed by the client model id.
+func buildRequest(req *MessagesRequest, effortByModel map[string]map[string]string) (*alphaRequest, error) {
 	if req.Model == "" {
 		return nil, fmt.Errorf("model is required")
 	}
@@ -61,12 +68,13 @@ func buildRequest(req *MessagesRequest) (*alphaRequest, error) {
 		Taste:  nil,
 		Skills: "",
 		Params: alphaParams{
-			Tools:     buildTools(req.Tools),
-			Stream:    req.Stream,
-			MaxTokens: clampMaxTokens(req.MaxTokens),
-			System:    system,
-			Messages:  messages,
-			Model:     req.Model,
+			Tools:           buildTools(req.Tools),
+			Stream:          req.Stream,
+			MaxTokens:       clampMaxTokens(req.MaxTokens),
+			System:          system,
+			Messages:        messages,
+			Model:           req.Model,
+			ReasoningEffort: mappedReasoningEffort(req.Model, req.OutputConfig.Effort, effortByModel),
 		},
 		ThreadID: threadID,
 	}, nil
@@ -242,6 +250,58 @@ func clampMaxTokens(n int) int {
 		return maxAlphaTokens
 	}
 	return n
+}
+
+// lookupEffortMapping returns the configured actual for a client effort.
+// ok is false when the model or seen value is unmapped (today's omit).
+func lookupEffortMapping(model, clientEffort string, byModel map[string]map[string]string) (actual string, ok bool) {
+	if clientEffort == "" || len(byModel) == 0 {
+		return "", false
+	}
+	m := byModel[model]
+	if len(m) == 0 {
+		return "", false
+	}
+	actual, ok = m[clientEffort]
+	return actual, ok
+}
+
+// mappedReasoningEffort returns the Command Code params.reasoning_effort value
+// for a client model and Grok/Anthropic output_config.effort. An empty result
+// means omit the field (today's behavior, drop, or no mapping).
+func mappedReasoningEffort(model, clientEffort string, byModel map[string]map[string]string) string {
+	actual, ok := lookupEffortMapping(model, clientEffort, byModel)
+	if !ok || actual == "" || actual == effortDrop || actual == effortInvalid {
+		return ""
+	}
+	return actual
+}
+
+// unsupportedEffortError is non-nil when the mapping marks this client effort
+// as invalid for the model. The proxy must return that to the client and not
+// call Command Code.
+func unsupportedEffortError(model, clientEffort string, byModel map[string]map[string]string) error {
+	actual, ok := lookupEffortMapping(model, clientEffort, byModel)
+	if !ok || actual != effortInvalid {
+		return nil
+	}
+	return fmt.Errorf("model %q does not support effort %q", model, clientEffort)
+}
+
+// effortLogNote is a brief-log suffix when a mapping changes the value
+// (medium->high) or drops it. Identity maps (high->high) are silent.
+func effortLogNote(model, clientEffort string, byModel map[string]map[string]string) string {
+	actual, ok := lookupEffortMapping(model, clientEffort, byModel)
+	if !ok {
+		return ""
+	}
+	if actual == "" {
+		actual = effortDrop
+	}
+	if actual == clientEffort {
+		return ""
+	}
+	return fmt.Sprintf(", effort=%s->%s", clientEffort, actual)
 }
 
 // newThreadID returns a random UUIDv4; Command Code validates the threadId as a

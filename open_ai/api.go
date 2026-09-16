@@ -32,7 +32,10 @@ Options:
   --model-capability MODEL=opt1,opt2
                                    declare per-model capability limits, can be repeated;
                                    opts: no-image (strip image blocks, replace with a text
-                                   note so the model still answers on text)
+                                   note so the model still answers on text);
+                                   effort-mapping=seen:actual;... (Command Code only:
+                                   map output_config.effort to params.reasoning_effort;
+                                   actual is low, high, max, drop, or invalid)
   --port PORT                      port to listen on (default: 8080)
   --filter-text-snapshot           filter text snapshot in streaming response:
                                    e.g. {"type":"text","text":" tool...", "snapshot":"A tool..."}
@@ -68,6 +71,9 @@ Examples:
    llm-proxy capture --env-commandcode cmd-xhd2015 -p "hello" --yolo --skip-onboarding
 
    llm-proxy --proxy-commandcode --port 8892
+
+   llm-proxy --proxy-commandcode --port 8892 \
+     --model-capability deepseek/deepseek-v4-flash=effort-mapping=low:low;medium:high;high:high;xhigh:high;max:max
 
 Run llm-proxy capture --help for capture options.
 Run llm-proxy commandcode-models --help for Command Code model config.
@@ -207,6 +213,7 @@ func Handle(args []string) error {
 			Verbose:            verbose,
 			Logger:             fullLogger,
 			NoCoalesceThinking: noCoalesceThinking,
+			EffortByModel:      effortByModelFromCaps(modelCaps),
 		})
 	}
 	if baseUrl == "" {

@@ -21,6 +21,14 @@ type MessagesRequest struct {
 	// for models that support it; the proxy only reads display=summarized so it
 	// can coalesce token-level reasoning and text deltas.
 	Thinking json.RawMessage `json:"thinking"`
+	// OutputConfig carries Grok/Anthropic effort. When --model-capability
+	// effort-mapping is set for the request model, Effort is mapped onto
+	// params.reasoning_effort.
+	OutputConfig outputConfig `json:"output_config"`
+}
+
+type outputConfig struct {
+	Effort string `json:"effort"`
 }
 
 // thinkingDisplay is the subset of thinking config that controls coalescing.
@@ -144,12 +152,13 @@ type alphaConfig struct {
 }
 
 type alphaParams struct {
-	Tools     []alphaTool    `json:"tools"`
-	Stream    bool           `json:"stream"`
-	MaxTokens int            `json:"max_tokens"`
-	System    any            `json:"system"`
-	Messages  []alphaMessage `json:"messages"`
-	Model     string         `json:"model"`
+	Tools           []alphaTool    `json:"tools"`
+	Stream          bool           `json:"stream"`
+	MaxTokens       int            `json:"max_tokens"`
+	System          any            `json:"system"`
+	Messages        []alphaMessage `json:"messages"`
+	Model           string         `json:"model"`
+	ReasoningEffort string         `json:"reasoning_effort,omitempty"`
 }
 
 type alphaTool struct {

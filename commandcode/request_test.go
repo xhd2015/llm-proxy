@@ -3,6 +3,7 @@ package commandcode
 import (
 	"encoding/json"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -38,7 +39,7 @@ func TestBuildRequestTextOnly(t *testing.T) {
 		"messages":[{"role":"user","content":"hi"}]
 	}`)
 
-	got, err := buildRequest(req)
+	got, err := buildRequest(req, nil)
 	if err != nil {
 		t.Fatalf("buildRequest: %v", err)
 	}
@@ -79,7 +80,7 @@ func TestBuildRequestSystemForms(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := buildRequest(parseRequest(t, tt.body))
+			got, err := buildRequest(parseRequest(t, tt.body), nil)
 			if err != nil {
 				t.Fatalf("buildRequest: %v", err)
 			}
@@ -97,7 +98,7 @@ func TestBuildRequestSystemBlocksKeepCacheControl(t *testing.T) {
 		          {"type":"text","text":"b","cache_control":{"type":"ephemeral"}}],
 		"messages":[{"role":"user","content":"x"}]
 	}`)
-	got, err := buildRequest(req)
+	got, err := buildRequest(req, nil)
 	if err != nil {
 		t.Fatalf("buildRequest: %v", err)
 	}
@@ -129,7 +130,7 @@ func TestBuildRequestToolRoundTrip(t *testing.T) {
 		]
 	}`)
 
-	got, err := buildRequest(req)
+	got, err := buildRequest(req, nil)
 	if err != nil {
 		t.Fatalf("buildRequest: %v", err)
 	}
@@ -187,7 +188,7 @@ func TestBuildRequestToolResultWithBlocks(t *testing.T) {
 				"content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}]}
 		]
 	}`)
-	got, err := buildRequest(req)
+	got, err := buildRequest(req, nil)
 	if err != nil {
 		t.Fatalf("buildRequest: %v", err)
 	}
@@ -205,7 +206,7 @@ func TestBuildRequestImageBlock(t *testing.T) {
 			{"type":"text","text":"what is this"},
 			{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]}]
 	}`)
-	got, err := buildRequest(req)
+	got, err := buildRequest(req, nil)
 	if err != nil {
 		t.Fatalf("buildRequest: %v", err)
 	}
@@ -235,7 +236,7 @@ func TestBuildRequestMaxTokensClamp(t *testing.T) {
 			MaxTokens: tt.in,
 			Messages:  []Message{{Role: "user", Content: json.RawMessage(`"x"`)}},
 		}
-		got, err := buildRequest(req)
+		got, err := buildRequest(req, nil)
 		if err != nil {
 			t.Fatalf("buildRequest: %v", err)
 		}
@@ -255,7 +256,7 @@ func TestBuildRequestRejectsInvalid(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := buildRequest(parseRequest(t, tt.body)); err == nil {
+			if _, err := buildRequest(parseRequest(t, tt.body), nil); err == nil {
 				t.Error("expected an error")
 			}
 		})
@@ -266,5 +267,131 @@ func TestClampMaxTokensZeroIsNotSentAsZero(t *testing.T) {
 	// Command Code requires a positive max_tokens; a zero must be replaced.
 	if got := clampMaxTokens(0); got != maxAlphaTokens {
 		t.Errorf("clampMaxTokens(0) = %d", got)
+	}
+}
+
+func TestMappedReasoningEffort(t *testing.T) {
+	deepseek := map[string]map[string]string{
+		"deepseek/deepseek-v4-flash": {
+			"low": "low", "medium": "high", "high": "high", "xhigh": "high", "max": "max",
+			"none": "drop", "minimal": "invalid",
+		},
+	}
+	tests := []struct {
+		model, effort, want string
+	}{
+		{"deepseek/deepseek-v4-flash", "low", "low"},
+		{"deepseek/deepseek-v4-flash", "medium", "high"},
+		{"deepseek/deepseek-v4-flash", "xhigh", "high"},
+		{"deepseek/deepseek-v4-flash", "max", "max"},
+		{"deepseek/deepseek-v4-flash", "none", ""},
+		{"deepseek/deepseek-v4-flash", "minimal", ""},
+		{"deepseek/deepseek-v4-flash", "ultra", ""},
+		{"deepseek/deepseek-v4-flash", "", ""},
+		{"kimi-k3", "high", ""},
+		{"deepseek/deepseek-v4-flash", "high", "high"},
+	}
+	for _, tt := range tests {
+		got := mappedReasoningEffort(tt.model, tt.effort, deepseek)
+		if got != tt.want {
+			t.Errorf("mappedReasoningEffort(%q, %q) = %q, want %q", tt.model, tt.effort, got, tt.want)
+		}
+	}
+	if got := mappedReasoningEffort("deepseek/deepseek-v4-flash", "high", nil); got != "" {
+		t.Errorf("nil map = %q, want empty", got)
+	}
+	if err := unsupportedEffortError("deepseek/deepseek-v4-flash", "minimal", deepseek); err == nil {
+		t.Error("expected unsupportedEffortError for minimal->invalid")
+	} else if !strings.Contains(err.Error(), `does not support effort "minimal"`) {
+		t.Errorf("error = %v", err)
+	}
+	if err := unsupportedEffortError("deepseek/deepseek-v4-flash", "low", deepseek); err != nil {
+		t.Errorf("low should be allowed: %v", err)
+	}
+}
+
+func TestEffortLogNote(t *testing.T) {
+	m := map[string]map[string]string{
+		"deepseek/deepseek-v4-flash": {"low": "low", "medium": "high", "xhigh": "drop", "minimal": "invalid"},
+	}
+	tests := []struct {
+		effort, want string
+	}{
+		{"low", ""},
+		{"medium", ", effort=medium->high"},
+		{"xhigh", ", effort=xhigh->drop"},
+		{"minimal", ", effort=minimal->invalid"},
+		{"max", ""},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		got := effortLogNote("deepseek/deepseek-v4-flash", tt.effort, m)
+		if got != tt.want {
+			t.Errorf("effortLogNote(%q) = %q, want %q", tt.effort, got, tt.want)
+		}
+	}
+	if got := effortLogNote("kimi-k3", "low", m); got != "" {
+		t.Errorf("other model = %q, want empty", got)
+	}
+}
+
+func TestBuildRequestEffortMapping(t *testing.T) {
+	mapping := map[string]map[string]string{
+		"deepseek/deepseek-v4-flash": {"low": "low", "medium": "high", "xhigh": "drop", "minimal": "invalid"},
+	}
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "maps medium to high",
+			body: `{"model":"deepseek/deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"output_config":{"effort":"medium"}}`,
+			want: "high",
+		},
+		{
+			name: "drop omits field",
+			body: `{"model":"deepseek/deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"output_config":{"effort":"xhigh"}}`,
+			want: "",
+		},
+		{
+			name: "invalid omits field",
+			body: `{"model":"deepseek/deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"output_config":{"effort":"minimal"}}`,
+			want: "",
+		},
+		{
+			name: "unmapped effort omits field",
+			body: `{"model":"deepseek/deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"output_config":{"effort":"max"}}`,
+			want: "",
+		},
+		{
+			name: "no output_config omits field",
+			body: `{"model":"deepseek/deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}`,
+			want: "",
+		},
+		{
+			name: "other model omits field",
+			body: `{"model":"kimi-k3","messages":[{"role":"user","content":"hi"}],"output_config":{"effort":"low"}}`,
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := buildRequest(parseRequest(t, tt.body), mapping)
+			if err != nil {
+				t.Fatalf("buildRequest: %v", err)
+			}
+			if got.Params.ReasoningEffort != tt.want {
+				t.Errorf("reasoning_effort = %q, want %q", got.Params.ReasoningEffort, tt.want)
+			}
+			wire := asMap(t, got.Params)
+			if tt.want == "" {
+				if _, ok := wire["reasoning_effort"]; ok {
+					t.Errorf("wire params still has reasoning_effort: %v", wire["reasoning_effort"])
+				}
+			} else if wire["reasoning_effort"] != tt.want {
+				t.Errorf("wire reasoning_effort = %v, want %q", wire["reasoning_effort"], tt.want)
+			}
+		})
 	}
 }

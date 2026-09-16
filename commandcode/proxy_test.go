@@ -137,6 +137,74 @@ func TestProxySendsRequiredUpstreamHeaders(t *testing.T) {
 	if system, _ := params["system"].(string); strings.TrimSpace(system) == "" {
 		t.Errorf("params.system = %v, want a non-empty system prompt", params["system"])
 	}
+	if _, ok := params["reasoning_effort"]; ok {
+		t.Errorf("reasoning_effort = %v, want omitted when no mapping is configured", params["reasoning_effort"])
+	}
+}
+
+func TestProxyForwardsMappedReasoningEffort(t *testing.T) {
+	logs := captureLog(t)
+	up, upstream := newUpstream(t, http.StatusOK, `{"type":"text-delta","text":"hi"}
+{"type":"finish","finishReason":"stop","totalUsage":{"inputTokens":1,"outputTokens":1}}
+`)
+	proxy := newTestProxyOpts(t, upstream.URL, Options{
+		EffortByModel: map[string]map[string]string{
+			"deepseek/deepseek-v4-flash": {"medium": "high", "xhigh": "drop"},
+		},
+	})
+
+	resp, _ := postMessages(t, proxy.URL, `{"model":"deepseek/deepseek-v4-flash","stream":true,"messages":[{"role":"user","content":"hello"}],"output_config":{"effort":"medium"}}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	params := up.body["params"].(map[string]any)
+	if params["reasoning_effort"] != "high" {
+		t.Errorf("reasoning_effort = %v, want high", params["reasoning_effort"])
+	}
+	if !strings.Contains(logs.String(), "effort=medium->high") {
+		t.Errorf("brief log missing conversion: %s", logs.String())
+	}
+
+	resp, _ = postMessages(t, proxy.URL, `{"model":"deepseek/deepseek-v4-flash","stream":true,"messages":[{"role":"user","content":"hello"}],"output_config":{"effort":"xhigh"}}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("drop status = %d, want 200", resp.StatusCode)
+	}
+	params = up.body["params"].(map[string]any)
+	if _, ok := params["reasoning_effort"]; ok {
+		t.Errorf("reasoning_effort = %v after drop, want omitted", params["reasoning_effort"])
+	}
+	if !strings.Contains(logs.String(), "effort=xhigh->drop") {
+		t.Errorf("brief log missing drop: %s", logs.String())
+	}
+}
+
+func TestProxyRejectsInvalidEffort(t *testing.T) {
+	logs := captureLog(t)
+	up, upstream := newUpstream(t, http.StatusOK, `{"type":"text-delta","text":"hi"}
+{"type":"finish","finishReason":"stop","totalUsage":{"inputTokens":1,"outputTokens":1}}
+`)
+	proxy := newTestProxyOpts(t, upstream.URL, Options{
+		EffortByModel: map[string]map[string]string{
+			"deepseek/deepseek-v4-flash": {"low": "invalid"},
+		},
+	})
+
+	resp, body := postMessages(t, proxy.URL, `{"model":"deepseek/deepseek-v4-flash","stream":true,"messages":[{"role":"user","content":"hello"}],"output_config":{"effort":"low"}}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(body, `does not support effort`) || !strings.Contains(body, "low") {
+		t.Errorf("body = %s", body)
+	}
+	if !strings.Contains(body, "invalid_request_error") {
+		t.Errorf("body missing invalid_request_error: %s", body)
+	}
+	if up.request != nil {
+		t.Errorf("upstream was called: %v", up.request.URL)
+	}
+	if !strings.Contains(logs.String(), "effort=low->invalid") {
+		t.Errorf("brief log missing invalid conversion: %s", logs.String())
+	}
 }
 
 func TestProxyStreamsAnthropicSSE(t *testing.T) {

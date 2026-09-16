@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -59,7 +60,70 @@ func TestParseModelCapabilities(t *testing.T) {
 		{
 			name:    "unknown option",
 			entries: []string{"claude-haiku-5=no-vision"},
-			wantErr: `unknown option "no-vision" (known: no-image)`,
+			wantErr: `unknown option "no-vision" (known: no-image, effort-mapping=seen:actual;...)`,
+		},
+		{
+			name:    "effort-mapping DeepSeek table",
+			entries: []string{"deepseek/deepseek-v4-flash=effort-mapping=low:low;medium:high;high:high;xhigh:high;max:max"},
+			want: map[string]ModelCapability{
+				"deepseek/deepseek-v4-flash": {EffortMapping: map[string]string{
+					"low": "low", "medium": "high", "high": "high", "xhigh": "high", "max": "max",
+				}},
+			},
+		},
+		{
+			name:    "effort-mapping invalid actual",
+			entries: []string{"deepseek/deepseek-v4-flash=effort-mapping=low:invalid;high:high"},
+			want: map[string]ModelCapability{
+				"deepseek/deepseek-v4-flash": {EffortMapping: map[string]string{"low": "invalid", "high": "high"}},
+			},
+		},
+		{
+			name:    "effort-mapping drop and no-image together",
+			entries: []string{"deepseek/deepseek-v4-flash=no-image,effort-mapping=low:low;xhigh:drop"},
+			want: map[string]ModelCapability{
+				"deepseek/deepseek-v4-flash": {
+					NoImage:       true,
+					EffortMapping: map[string]string{"low": "low", "xhigh": "drop"},
+				},
+			},
+		},
+		{
+			name:    "effort-mapping merge with later no-image on same model",
+			entries: []string{"m=effort-mapping=high:high", "m=no-image"},
+			want: map[string]ModelCapability{
+				"m": {NoImage: true, EffortMapping: map[string]string{"high": "high"}},
+			},
+		},
+		{
+			name:    "duplicate effort-mapping token",
+			entries: []string{"m=effort-mapping=low:low,effort-mapping=high:high"},
+			wantErr: "duplicate effort-mapping",
+		},
+		{
+			name:    "duplicate effort-mapping across flags",
+			entries: []string{"m=effort-mapping=low:low", "m=effort-mapping=high:high"},
+			wantErr: "duplicate effort-mapping",
+		},
+		{
+			name:    "duplicate seen key",
+			entries: []string{"m=effort-mapping=low:low;low:high"},
+			wantErr: `duplicate effort-mapping key "low"`,
+		},
+		{
+			name:    "invalid actual",
+			entries: []string{"m=effort-mapping=low:medium"},
+			wantErr: `effort-mapping actual "medium" is not low, high, max, drop, or invalid`,
+		},
+		{
+			name:    "empty effort-mapping",
+			entries: []string{"m=effort-mapping="},
+			wantErr: "effort-mapping is empty",
+		},
+		{
+			name:    "malformed pair",
+			entries: []string{"m=effort-mapping=low"},
+			wantErr: `want seen:actual`,
 		},
 	}
 
@@ -78,13 +142,8 @@ func TestParseModelCapabilities(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if len(got) != len(tt.want) {
-				t.Fatalf("got %v, want %v", got, tt.want)
-			}
-			for model, wantCaps := range tt.want {
-				if got[model] != wantCaps {
-					t.Errorf("caps[%q] = %v, want %v", model, got[model], wantCaps)
-				}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("got %#v, want %#v", got, tt.want)
 			}
 		})
 	}
@@ -364,6 +423,36 @@ func TestHandleRejectsInvalidModelCapability(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), `unknown option "no-vision"`) {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestHandleRejectsInvalidEffortMapping(t *testing.T) {
+	err := Handle([]string{"--model-capability", "deepseek/deepseek-v4-flash=effort-mapping=low:medium", "--proxy-commandcode"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), `effort-mapping actual "medium"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestEffortByModelFromCaps(t *testing.T) {
+	caps, err := parseModelCapabilities([]string{
+		"deepseek/deepseek-v4-flash=effort-mapping=low:low;max:drop",
+		"other=no-image",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := effortByModelFromCaps(caps)
+	want := map[string]map[string]string{
+		"deepseek/deepseek-v4-flash": {"low": "low", "max": "drop"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+	if effortByModelFromCaps(nil) != nil {
+		t.Fatal("nil caps should yield nil maps")
 	}
 }
 

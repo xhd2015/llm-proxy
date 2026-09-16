@@ -6,6 +6,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sort"
+	"strings"
 	"time"
 
 	logutil "github.com/xhd2015/llm-proxy/log"
@@ -30,6 +32,10 @@ type Options struct {
 	// NoCoalesceThinking flushes every Command Code reasoning-delta and
 	// text-delta, even when the client sent thinking.display=summarized.
 	NoCoalesceThinking bool
+	// EffortByModel maps client model id -> (client effort -> Command Code
+	// reasoning_effort). Values of "drop" omit the upstream field. A missing
+	// model or missing client effort leaves today's behavior (no field).
+	EffortByModel map[string]map[string]string
 }
 
 // Start validates credentials and serves the proxy until the process stops.
@@ -71,6 +77,7 @@ func Start(opts Options) error {
 	log.Printf("Command Code proxy running at %s", endpoint)
 	log.Printf("Upstream: %s", opts.BaseURL)
 	log.Printf("Credentials: %s (%s)", authPath, auth.UserName)
+	logEffortMappings(opts.EffortByModel)
 	printSetup(endpoint)
 
 	return http.ListenAndServe(fmt.Sprintf("localhost:%d", opts.Port), mux)
@@ -102,6 +109,30 @@ func (h *handler) routes() *http.ServeMux {
 	mux.HandleFunc("/v1/models-v2", h.modelsV2)
 	mux.HandleFunc("/v1/models", h.models)
 	return mux
+}
+
+func logEffortMappings(byModel map[string]map[string]string) {
+	if len(byModel) == 0 {
+		return
+	}
+	models := make([]string, 0, len(byModel))
+	for model := range byModel {
+		models = append(models, model)
+	}
+	sort.Strings(models)
+	for _, model := range models {
+		m := byModel[model]
+		seens := make([]string, 0, len(m))
+		for seen := range m {
+			seens = append(seens, seen)
+		}
+		sort.Strings(seens)
+		pairs := make([]string, 0, len(seens))
+		for _, seen := range seens {
+			pairs = append(pairs, seen+"->"+m[seen])
+		}
+		log.Printf("Effort mapping %s: %s", model, strings.Join(pairs, ", "))
+	}
 }
 
 // logf writes a brief line. Like the other proxy modes, the terminal always
@@ -140,8 +171,9 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	start := time.Now()
-	h.logf("Request: POST /v1/messages (model=%s, stream=%v, messages=%d, tools=%d)",
-		req.Model, req.Stream, len(req.Messages), len(req.Tools))
+	h.logf("Request: POST /v1/messages (model=%s, stream=%v, messages=%d, tools=%d%s)",
+		req.Model, req.Stream, len(req.Messages), len(req.Tools),
+		effortLogNote(req.Model, req.OutputConfig.Effort, h.opts.EffortByModel))
 	if h.opts.Verbose {
 		logutil.LogHeaders(r.Header, h.logf)
 		h.logf("Body: %s", string(body))
@@ -149,7 +181,13 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request) {
 		h.fullLogf("Body: %s", string(body))
 	}
 
-	alphaReq, err := buildRequest(&req)
+	if err := unsupportedEffortError(req.Model, req.OutputConfig.Effort, h.opts.EffortByModel); err != nil {
+		h.logf("Invalid request: %v", err)
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+
+	alphaReq, err := buildRequest(&req, h.opts.EffortByModel)
 	if err != nil {
 		h.logf("Invalid request: %v", err)
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
