@@ -141,7 +141,38 @@ func parseAlphaUsage(raw json.RawMessage) (usageInfo, bool) {
 		OutputTokens:     u.OutputTokens,
 		CacheReadTokens:  u.InputTokenDetails.CacheReadTokens,
 		CacheWriteTokens: u.InputTokenDetails.CacheWriteTokens,
+		NoCacheTokens:    u.InputTokenDetails.NoCacheTokens,
 	}, true
+}
+
+// usageForDSH maps Command Code inclusive prompt tokens onto Anthropic disjoint
+// buckets: input_tokens is the uncached miss.
+func usageForDSH(u usageInfo) usageInfo {
+	miss := u.NoCacheTokens
+	if miss <= 0 {
+		miss = u.InputTokens - u.CacheReadTokens
+	}
+	if miss < 0 {
+		miss = 0
+	}
+	u.InputTokens = miss
+	return u
+}
+
+func anthropicUsageMap(u usageInfo, includeCache bool) map[string]any {
+	out := map[string]any{
+		"input_tokens":  u.InputTokens,
+		"output_tokens": u.OutputTokens,
+	}
+	if includeCache {
+		if u.CacheReadTokens > 0 {
+			out["cache_read_input_tokens"] = u.CacheReadTokens
+		}
+		if u.CacheWriteTokens > 0 {
+			out["cache_creation_input_tokens"] = u.CacheWriteTokens
+		}
+	}
+	return out
 }
 
 // mergeUsage folds a later usage report into the accumulated one. finish-step
@@ -160,6 +191,9 @@ func mergeUsage(prev, next usageInfo) usageInfo {
 	}
 	if next.CacheWriteTokens > 0 {
 		out.CacheWriteTokens = next.CacheWriteTokens
+	}
+	if next.NoCacheTokens > 0 {
+		out.NoCacheTokens = next.NoCacheTokens
 	}
 	return out
 }
@@ -187,17 +221,20 @@ type sseSink struct {
 	thinkingRunes int
 	textBuf       strings.Builder
 	textRunes     int
+
+	adjustUsageForDSH bool
 }
 
-func newSSESink(w http.ResponseWriter, model, msgID string, coalesce bool) *sseSink {
+func newSSESink(w http.ResponseWriter, model, msgID string, coalesce, adjustUsageForDSH bool) *sseSink {
 	flusher, _ := w.(http.Flusher)
 	return &sseSink{
-		w:            w,
-		flusher:      flusher,
-		model:        model,
-		msgID:        msgID,
-		openText:     -1,
-		openThinking: -1,
+		w:                 w,
+		flusher:           flusher,
+		model:             model,
+		msgID:             msgID,
+		openText:          -1,
+		openThinking:      -1,
+		adjustUsageForDSH: adjustUsageForDSH,
 		openTools:    map[string]int{},
 		coalesce:     coalesce,
 	}
@@ -508,6 +545,9 @@ func (s *sseSink) finished(stopReason string, usage usageInfo) error {
 
 	// Input tokens are only known once the upstream stream finishes, so they
 	// are reported on message_delta rather than message_start.
+	if s.adjustUsageForDSH {
+		usage = usageForDSH(usage)
+	}
 	deltaUsage := map[string]any{"output_tokens": usage.OutputTokens}
 	if usage.InputTokens > 0 {
 		deltaUsage["input_tokens"] = usage.InputTokens
@@ -532,11 +572,12 @@ func (s *sseSink) finished(stopReason string, usage usageInfo) error {
 // messageSink accumulates decoded parts into a single Anthropic message for
 // non-streaming requests.
 type messageSink struct {
-	content    []map[string]any
-	text       strings.Builder
-	thinking   strings.Builder
-	usage      usageInfo
-	stopReason string
+	content           []map[string]any
+	text              strings.Builder
+	thinking          strings.Builder
+	usage             usageInfo
+	stopReason        string
+	adjustUsageForDSH bool
 }
 
 func (s *messageSink) flushText() {
@@ -611,6 +652,10 @@ func (s *messageSink) message(msgID, model string) map[string]any {
 	if content == nil {
 		content = []map[string]any{}
 	}
+	usage := s.usage
+	if s.adjustUsageForDSH {
+		usage = usageForDSH(usage)
+	}
 	return map[string]any{
 		"id":            msgID,
 		"type":          "message",
@@ -619,10 +664,7 @@ func (s *messageSink) message(msgID, model string) map[string]any {
 		"content":       content,
 		"stop_reason":   s.stopReason,
 		"stop_sequence": nil,
-		"usage": map[string]any{
-			"input_tokens":  s.usage.InputTokens,
-			"output_tokens": s.usage.OutputTokens,
-		},
+		"usage":         anthropicUsageMap(usage, s.adjustUsageForDSH),
 	}
 }
 

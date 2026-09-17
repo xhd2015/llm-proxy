@@ -60,7 +60,7 @@ func TestParseModelCapabilities(t *testing.T) {
 		{
 			name:    "unknown option",
 			entries: []string{"claude-haiku-5=no-vision"},
-			wantErr: `unknown option "no-vision" (known: no-image, effort-mapping=seen:actual;...)`,
+			wantErr: `unknown option "no-vision" (known: no-image, adjust-usage-for-dsh, effort-mapping=seen:actual;...)`,
 		},
 		{
 			name:    "effort-mapping DeepSeek table",
@@ -124,6 +124,23 @@ func TestParseModelCapabilities(t *testing.T) {
 			name:    "malformed pair",
 			entries: []string{"m=effort-mapping=low"},
 			wantErr: `want seen:actual`,
+		},
+		{
+			name:    "adjust-usage-for-dsh with effort-mapping",
+			entries: []string{"deepseek/deepseek-v4.1-flash=effort-mapping=high:high,adjust-usage-for-dsh"},
+			want: map[string]ModelCapability{
+				"deepseek/deepseek-v4.1-flash": {
+					EffortMapping:     map[string]string{"high": "high"},
+					AdjustUsageForDSH: true,
+				},
+			},
+		},
+		{
+			name:    "adjust-usage-for-dsh merge across flags",
+			entries: []string{"m=adjust-usage-for-dsh", "m=no-image"},
+			want: map[string]ModelCapability{
+				"m": {NoImage: true, AdjustUsageForDSH: true},
+			},
 		},
 	}
 
@@ -453,6 +470,23 @@ func TestEffortByModelFromCaps(t *testing.T) {
 	}
 	if effortByModelFromCaps(nil) != nil {
 		t.Fatal("nil caps should yield nil maps")
+	}
+}
+
+func TestAdjustUsageForDSHFromCaps(t *testing.T) {
+	caps, err := parseModelCapabilities([]string{
+		"deepseek/deepseek-v4.1-flash=adjust-usage-for-dsh",
+		"other=no-image",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := adjustUsageForDSHFromCaps(caps)
+	if !got["deepseek/deepseek-v4.1-flash"] || got["other"] {
+		t.Fatalf("got %#v", got)
+	}
+	if adjustUsageForDSHFromCaps(nil) != nil {
+		t.Fatal("nil caps should yield nil map")
 	}
 }
 

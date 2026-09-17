@@ -35,7 +35,9 @@ Options:
                                    note so the model still answers on text);
                                    effort-mapping=seen:actual;... (Command Code only:
                                    map output_config.effort to params.reasoning_effort;
-                                   actual is low, high, max, drop, or invalid)
+                                   actual is low, high, max, drop, or invalid);
+                                   adjust-usage-for-dsh (Command Code: emit Anthropic
+                                   input_tokens as uncached miss so DSH cache-hit % is disjoint)
   --port PORT                      port to listen on (default: 8080)
   --filter-text-snapshot           filter text snapshot in streaming response:
                                    e.g. {"type":"text","text":" tool...", "snapshot":"A tool..."}
@@ -214,6 +216,7 @@ func Handle(args []string) error {
 			Logger:             fullLogger,
 			NoCoalesceThinking: noCoalesceThinking,
 			EffortByModel:      effortByModelFromCaps(modelCaps),
+			AdjustUsageForDSH:  adjustUsageForDSHFromCaps(modelCaps),
 		})
 	}
 	if baseUrl == "" {

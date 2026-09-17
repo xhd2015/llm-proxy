@@ -36,6 +36,9 @@ type Options struct {
 	// reasoning_effort). Values of "drop" omit the upstream field. A missing
 	// model or missing client effort leaves today's behavior (no field).
 	EffortByModel map[string]map[string]string
+	// AdjustUsageForDSH, keyed by client model id, rewrites Anthropic
+	// input_tokens to the uncached miss so DSH cache-hit % is disjoint.
+	AdjustUsageForDSH map[string]bool
 }
 
 // Start validates credentials and serves the proxy until the process stops.
@@ -78,6 +81,7 @@ func Start(opts Options) error {
 	log.Printf("Upstream: %s", opts.BaseURL)
 	log.Printf("Credentials: %s (%s)", authPath, auth.UserName)
 	logEffortMappings(opts.EffortByModel)
+	logAdjustUsageForDSH(opts.AdjustUsageForDSH)
 	printSetup(endpoint)
 
 	return http.ListenAndServe(fmt.Sprintf("localhost:%d", opts.Port), mux)
@@ -133,6 +137,23 @@ func logEffortMappings(byModel map[string]map[string]string) {
 		}
 		log.Printf("Effort mapping %s: %s", model, strings.Join(pairs, ", "))
 	}
+}
+
+func logAdjustUsageForDSH(byModel map[string]bool) {
+	if len(byModel) == 0 {
+		return
+	}
+	models := make([]string, 0, len(byModel))
+	for model, on := range byModel {
+		if on {
+			models = append(models, model)
+		}
+	}
+	if len(models) == 0 {
+		return
+	}
+	sort.Strings(models)
+	log.Printf("Adjust usage for DSH: %s", strings.Join(models, ", "))
 }
 
 // logf writes a brief line. Like the other proxy modes, the terminal always
@@ -212,7 +233,7 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request) {
 
 	msgID := newMessageID()
 	if !req.Stream {
-		sink := &messageSink{}
+		sink := &messageSink{adjustUsageForDSH: h.opts.AdjustUsageForDSH[req.Model]}
 		if err := decodeAlpha(resp.Body, sink); err != nil {
 			h.logf("Error: %v", err)
 			writeAnthropicError(w, http.StatusBadGateway, "api_error", err.Error())
@@ -229,7 +250,7 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 
-	sink := newSSESink(w, req.Model, msgID, coalesceThinkingDeltas(req.Thinking, h.opts.NoCoalesceThinking))
+	sink := newSSESink(w, req.Model, msgID, coalesceThinkingDeltas(req.Thinking, h.opts.NoCoalesceThinking), h.opts.AdjustUsageForDSH[req.Model])
 	if err := decodeAlpha(resp.Body, sink); err != nil {
 		h.logf("Stream error: %v", err)
 		writeAnthropicStreamError(w, "api_error", err.Error())
