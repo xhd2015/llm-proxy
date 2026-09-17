@@ -62,8 +62,13 @@ Options:
   --no-coalesce-thinking           flush every Command Code reasoning-delta
                                    and text-delta (default: coalesce both when
                                    the client sends thinking.display=summarized)
+  --proxy-grok                     serve a Responses proxy backed by your
+                                   Grok CLI session (cli-chat-proxy.grok.com)
+  --grok-home DIR                  Grok config dir holding auth.json
+                                   (default: ~/.grok)
   codex-models                    print grok config.toml blocks for all Codex models
   commandcode-models              print grok config.toml blocks for all Command Code models
+  grok-models                     print Codex config.toml blocks for Grok models
 
 Examples:
    llm-proxy --base-url http://localhost:8081 --model model-alias=actual-model
@@ -77,8 +82,11 @@ Examples:
    llm-proxy --proxy-commandcode --port 8892 \
      --model-capability deepseek/deepseek-v4-flash=effort-mapping=low:low;medium:high;high:high;xhigh:high;max:max
 
+   llm-proxy --proxy-grok --port 8893
+
 Run llm-proxy capture --help for capture options.
 Run llm-proxy commandcode-models --help for Command Code model config.
+Run llm-proxy grok-models --help for Grok model config.
 `
 
 type usageRecord struct {
@@ -104,6 +112,8 @@ func Handle(args []string) error {
 			return capture.Handle(args[1:])
 		case "commandcode-models":
 			return handleCommandCodeModels(args[1:])
+		case "grok-models":
+			return handleGrokModels(args[1:])
 		}
 	}
 	var verbose bool
@@ -123,6 +133,8 @@ func Handle(args []string) error {
 	var commandCodeHome string
 	var commandCodeVersion string
 	var noCoalesceThinking bool
+	var proxyGrok bool
+	var grokHome string
 	var colorFlag *bool
 	var noColorFlag *bool
 	args, err := flags.String("--base-url", &baseUrl).
@@ -138,6 +150,8 @@ func Handle(args []string) error {
 		String("--commandcode-home", &commandCodeHome).
 		String("--commandcode-version", &commandCodeVersion).
 		Bool("--no-coalesce-thinking", &noCoalesceThinking).
+		Bool("--proxy-grok", &proxyGrok).
+		String("--grok-home", &grokHome).
 		Bool("--color", &colorFlag).
 		Bool("--no-color", &noColorFlag).
 		Bool("-v,--verbose", &verbose).
@@ -155,14 +169,20 @@ func Handle(args []string) error {
 	if feedToGrokCLI && !codex {
 		return fmt.Errorf("--feed-to-grok-cli requires --codex")
 	}
-	if proxyCommandCode && (openAI || codex || baseUrl != "") {
-		return fmt.Errorf("--proxy-commandcode cannot be combined with --open-ai, --codex, or --base-url")
+	if proxyCommandCode && (openAI || codex || proxyGrok || baseUrl != "") {
+		return fmt.Errorf("--proxy-commandcode cannot be combined with --open-ai, --codex, --proxy-grok, or --base-url")
 	}
 	if !proxyCommandCode && (commandCodeHome != "" || commandCodeVersion != "") {
 		return fmt.Errorf("--commandcode-home and --commandcode-version require --proxy-commandcode")
 	}
 	if noCoalesceThinking && !proxyCommandCode {
 		return fmt.Errorf("--no-coalesce-thinking requires --proxy-commandcode")
+	}
+	if proxyGrok && (openAI || codex || proxyCommandCode || baseUrl != "") {
+		return fmt.Errorf("--proxy-grok cannot be combined with --open-ai, --codex, --proxy-commandcode, or --base-url")
+	}
+	if grokHome != "" && !proxyGrok {
+		return fmt.Errorf("--grok-home requires --proxy-grok")
 	}
 	colorMode, err := colorModeFromFlags(colorFlag, noColorFlag)
 	if err != nil {
@@ -218,6 +238,9 @@ func Handle(args []string) error {
 			EffortByModel:      effortByModelFromCaps(modelCaps),
 			AdjustUsageForDSH:  adjustUsageForDSHFromCaps(modelCaps),
 		})
+	}
+	if proxyGrok {
+		return startGrokProxy(grokHome, port, logFile)
 	}
 	if baseUrl == "" {
 		return fmt.Errorf("missing --base-url")

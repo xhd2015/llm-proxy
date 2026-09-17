@@ -152,6 +152,30 @@ func TestHandleRejectsNoCoalesceThinkingWithoutCommandCode(t *testing.T) {
 	}
 }
 
+func TestHandleRejectsGrokCombinations(t *testing.T) {
+	tests := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--proxy-grok", "--codex"}, "--proxy-grok cannot be combined"},
+		{[]string{"--proxy-grok", "--open-ai"}, "--proxy-grok cannot be combined"},
+		{[]string{"--proxy-grok", "--base-url", "https://example.test"}, "--proxy-grok cannot be combined"},
+		{[]string{"--proxy-grok", "--proxy-commandcode"}, "--proxy-commandcode cannot be combined"},
+		{[]string{"--grok-home", "/tmp/x", "--base-url", "https://example.test"}, "--grok-home requires --proxy-grok"},
+	}
+	for _, tt := range tests {
+		t.Run(strings.Join(tt.args, " "), func(t *testing.T) {
+			err := Handle(tt.args)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error %q want substring %q", err.Error(), tt.want)
+			}
+		})
+	}
+}
+
 func TestNormalizeStreamingResponseAnthropicUsage(t *testing.T) {
 	body := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"cache_creation_input_tokens\":null,\"cache_read_input_tokens\":null}}}\n\n")
 

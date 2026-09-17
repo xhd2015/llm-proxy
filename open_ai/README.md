@@ -116,6 +116,28 @@ Responses are mocked, so the wrapped command finishes cleanly while the real
 outgoing requests are logged. The general HTTP/HTTPS proxy capture mode is not
 implemented yet, so `--env-commandcode` is currently required.
 
+# Grok CLI session proxy
+
+`--proxy-grok` serves an OpenAI Responses API on loopback backed by your
+Grok CLI session (`~/.grok/auth.json` → `https://cli-chat-proxy.grok.com`):
+
+```sh
+llm-proxy --proxy-grok --port 8893
+```
+
+Credentials are re-read from `~/.grok/auth.json` on every request and refreshed
+via the stored `refresh_token` when expired. Pass `--grok-home DIR` to read them
+from elsewhere. The proxy injects `Authorization`, `X-XAI-Token-Auth`,
+`x-grok-model-override`, and `x-grok-client-version`; the client key is ignored.
+
+Print Codex `config.toml` for every cached Grok model:
+
+```sh
+llm-proxy grok-models
+```
+
+Note this routes your real Grok subscription and consumes its quota.
+
 # Codex ChatGPT/OAuth proxy
 
 Use `--codex` when Codex is signed in with ChatGPT/OAuth and you want to route Codex traffic through llm-proxy:
