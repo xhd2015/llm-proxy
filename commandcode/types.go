@@ -244,6 +244,7 @@ type usageInfo struct {
 	OutputTokens     int
 	CacheReadTokens  int
 	CacheWriteTokens int
+	NoCacheTokens    int
 }
 
 // alphaError is the Command Code error envelope.

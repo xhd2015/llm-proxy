@@ -78,7 +78,7 @@ func collectSSE(t *testing.T, transcript string) []sseEvent {
 func collectSSECoalesce(t *testing.T, transcript string, coalesce bool) []sseEvent {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	sink := newSSESink(rec, "test-model", "msg_test", coalesce)
+	sink := newSSESink(rec, "test-model", "msg_test", coalesce, false)
 	if err := decodeAlpha(strings.NewReader(transcript), sink); err != nil {
 		t.Fatalf("decodeAlpha: %v", err)
 	}
@@ -205,6 +205,60 @@ func TestDecodeAlphaTextDeltasAndUsage(t *testing.T) {
 	}
 	if usage["cache_read_input_tokens"] != float64(7552) {
 		t.Errorf("cache_read_input_tokens = %v, want 7552", usage["cache_read_input_tokens"])
+	}
+}
+
+func TestDecodeAlphaAdjustUsageForDSH(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sink := newSSESink(rec, "test-model", "msg_test", false, true)
+	if err := decodeAlpha(strings.NewReader(realTranscript), sink); err != nil {
+		t.Fatalf("decodeAlpha: %v", err)
+	}
+	events := parseSSE(t, rec.Body.String())
+	var usage map[string]any
+	for _, ev := range events {
+		if ev.Event == "message_delta" {
+			usage = ev.Data["usage"].(map[string]any)
+		}
+	}
+	if usage["input_tokens"] != float64(307) {
+		t.Errorf("input_tokens = %v, want 307 (7859-7552)", usage["input_tokens"])
+	}
+	if usage["cache_read_input_tokens"] != float64(7552) {
+		t.Errorf("cache_read_input_tokens = %v, want 7552", usage["cache_read_input_tokens"])
+	}
+}
+
+func TestUsageForDSH(t *testing.T) {
+	got := usageForDSH(usageInfo{InputTokens: 100, CacheReadTokens: 80})
+	if got.InputTokens != 20 {
+		t.Errorf("subtract: input = %d, want 20", got.InputTokens)
+	}
+	got = usageForDSH(usageInfo{InputTokens: 100, CacheReadTokens: 80, NoCacheTokens: 15})
+	if got.InputTokens != 15 {
+		t.Errorf("noCacheTokens: input = %d, want 15", got.InputTokens)
+	}
+	got = usageForDSH(usageInfo{InputTokens: 50, CacheReadTokens: 80})
+	if got.InputTokens != 0 {
+		t.Errorf("clamp: input = %d, want 0", got.InputTokens)
+	}
+}
+
+func TestMessageSinkAdjustUsageForDSHIncludesCache(t *testing.T) {
+	s := &messageSink{adjustUsageForDSH: true}
+	if err := s.finished("end_turn", usageInfo{InputTokens: 100, OutputTokens: 3, CacheReadTokens: 80, CacheWriteTokens: 4}); err != nil {
+		t.Fatal(err)
+	}
+	msg := s.message("msg_1", "deepseek/deepseek-v4.1-flash")
+	usage := msg["usage"].(map[string]any)
+	if usage["input_tokens"] != 20 {
+		t.Errorf("input_tokens = %v, want 20", usage["input_tokens"])
+	}
+	if usage["cache_read_input_tokens"] != 80 {
+		t.Errorf("cache_read = %v, want 80", usage["cache_read_input_tokens"])
+	}
+	if usage["cache_creation_input_tokens"] != 4 {
+		t.Errorf("cache_write = %v, want 4", usage["cache_creation_input_tokens"])
 	}
 }
 

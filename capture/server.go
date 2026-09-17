@@ -37,6 +37,9 @@ type Server struct {
 	listener net.Listener
 	httpSrv  *http.Server
 	logger   *jsonlLogger
+	// serveDone is closed when Serve returns so Close can wait until the
+	// listen port is released.
+	serveDone chan struct{}
 
 	mu     sync.Mutex
 	count  int
@@ -65,7 +68,11 @@ func Start(opts ServerOptions) (*Server, error) {
 	s.register(mux, "/", s.handleUnknown)
 
 	s.httpSrv = &http.Server{Handler: mux}
-	go func() { _ = s.httpSrv.Serve(listener) }()
+	s.serveDone = make(chan struct{})
+	go func() {
+		defer close(s.serveDone)
+		_ = s.httpSrv.Serve(listener)
+	}()
 	return s, nil
 }
 
@@ -101,6 +108,7 @@ func (s *Server) Close() error {
 	s.closed = true
 	s.mu.Unlock()
 	_ = s.httpSrv.Close()
+	<-s.serveDone
 	return s.logger.Close()
 }
 

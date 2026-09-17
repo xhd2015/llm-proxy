@@ -5,7 +5,7 @@
 
 ## Errors
 
-- Non-nil, contains `unknown option "no-vision" (known: no-image)`.
+- Non-nil, contains `unknown option "no-vision"`.
 
 ## Exit Code
 
@@ -20,7 +20,7 @@ import (
 
 func Assert(t *testing.T, d *session.Doctest, req *Request, resp *Response, err error) {
 	t.Helper()
-	assertErrorContains(t, err, `unknown option "no-vision" (known: no-image)`)
+	assertErrorContains(t, err, `unknown option "no-vision"`)
 	if resp == nil {
 		t.Fatal("nil response")
 	}

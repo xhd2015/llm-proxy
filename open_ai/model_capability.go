@@ -17,6 +17,9 @@ type ModelCapability struct {
 	// low, high, max, drop (omit the upstream field), or invalid (400 the
 	// client). A missing key leaves today's behavior (do not send reasoning_effort).
 	EffortMapping map[string]string
+	// AdjustUsageForDSH rewrites Command Code Anthropic usage so input_tokens
+	// is the uncached miss (DSH cache-hit % is cache_read / (input + cache_read)).
+	AdjustUsageForDSH bool
 }
 
 // CapNoImage is a capability value with only NoImage set.
@@ -62,7 +65,11 @@ func parseModelCapabilities(entries []string) (map[string]ModelCapability, error
 				c.NoImage = true
 				continue
 			}
-			return nil, fmt.Errorf("invalid --model-capability %q: unknown option %q (known: no-image, effort-mapping=seen:actual;...)", e, opt)
+			if opt == "adjust-usage-for-dsh" {
+				c.AdjustUsageForDSH = true
+				continue
+			}
+			return nil, fmt.Errorf("invalid --model-capability %q: unknown option %q (known: no-image, adjust-usage-for-dsh, effort-mapping=seen:actual;...)", e, opt)
 		}
 		caps[model] = c
 	}
@@ -113,6 +120,23 @@ func effortByModelFromCaps(caps map[string]ModelCapability) map[string]map[strin
 			continue
 		}
 		out[model] = c.EffortMapping
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// adjustUsageForDSHFromCaps returns client model ids that rewrite Anthropic usage.
+func adjustUsageForDSHFromCaps(caps map[string]ModelCapability) map[string]bool {
+	if len(caps) == 0 {
+		return nil
+	}
+	out := make(map[string]bool)
+	for model, c := range caps {
+		if c.AdjustUsageForDSH {
+			out[model] = true
+		}
 	}
 	if len(out) == 0 {
 		return nil
