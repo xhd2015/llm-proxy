@@ -28,8 +28,9 @@ func Assert(t *testing.T, d *session.Doctest, req *Request, resp *Response, err 
 		t.Fatal("nil response")
 	}
 	for _, model := range []string{"claude-haiku-5", "claude-sonnet-5"} {
-		if resp.Parsed[model] != openai.CapNoImage {
-			t.Fatalf("Parsed[%q] = %v, want CapNoImage", model, resp.Parsed[model])
+		got := resp.Parsed[model]
+		if !got.NoImage || got.AdjustUsageForDSH || len(got.EffortMapping) != 0 {
+			t.Fatalf("Parsed[%q] = %+v, want CapNoImage", model, got)
 		}
 	}
 	if len(resp.Parsed) != 2 {

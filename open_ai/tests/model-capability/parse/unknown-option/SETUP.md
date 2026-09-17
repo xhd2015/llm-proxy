@@ -3,7 +3,7 @@
 **Feature**: an unrecognized capability option is rejected, naming the option and the known set.
 
 ```
-# "claude-haiku-5=no-vision" -> error: unknown option "no-vision" (known: no-image)
+# "claude-haiku-5=no-vision" -> error: unknown option "no-vision"
 ```
 
 ## Preconditions
