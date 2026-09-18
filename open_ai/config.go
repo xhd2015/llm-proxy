@@ -32,6 +32,7 @@ type configProvider struct {
 	AuthFile     string `json:"authFile"`
 	Version      string `json:"version"`
 	BaseURL      string `json:"baseUrl"`
+	DummyToken   string `json:"dummyToken"`
 }
 
 type configModel struct {
@@ -136,8 +137,14 @@ func validateProxyConfig(config proxyConfig) ([]effectiveRoute, error) {
 		if _, exists := providers[provider.Name]; exists {
 			return nil, fmt.Errorf("%s: duplicate provider name %q", where, provider.Name)
 		}
-		if provider.Kind != "commandcode" && provider.Kind != "codex" && provider.Kind != "grok" {
+		if provider.Kind != "commandcode" && provider.Kind != "codex" && provider.Kind != "grok" && provider.Kind != "http-proxy" {
 			return nil, fmt.Errorf("%s: unsupported provider kind %q", where, provider.Kind)
+		}
+		if provider.DummyToken != "" && provider.Kind != "http-proxy" {
+			return nil, fmt.Errorf("%s: dummyToken is only supported by http-proxy providers", where)
+		}
+		if provider.Kind == "http-proxy" && strings.TrimSpace(provider.DummyToken) != provider.DummyToken {
+			return nil, fmt.Errorf("%s: dummyToken must not have surrounding whitespace", where)
 		}
 		if !provider.Subscription && provider.BaseURL == "" {
 			return nil, fmt.Errorf("%s: baseUrl is required when subscription is false", where)
@@ -276,7 +283,7 @@ func validateModelMetadata(displayName string, input []string, contextWindow, ma
 
 func validReasoningEffort(effort string) bool {
 	switch effort {
-	case "off", "low", "medium", "high", "xhigh", "max":
+	case "off", "low", "medium", "high", "xhigh", "max", "ultra":
 		return true
 	default:
 		return false
@@ -455,6 +462,12 @@ func buildProviderHandler(route effectiveRoute, endpoint string, logger *logutil
 		}
 		proxy := newProxyWithOptions(target, map[string]string{route.clientModelName: route.providerModelName}, false, proxyOptions{stripPathPrefix: "/v1", disableWebSocketCompression: true, fullLogger: logger, logWebSocketMessages: true, codexTransform: true, feedToGrokCLI: route.feedToGrokCli, codexAuthFile: provider.AuthFile})
 		return newCodexProxyHandler(proxy, route.feedToGrokCli, codexModelsCachePath(), endpoint), nil
+	case "http-proxy":
+		target, err := url.Parse(provider.BaseURL)
+		if err != nil {
+			return nil, err
+		}
+		return newProxyWithOptions(target, map[string]string{route.clientModelName: route.providerModelName}, false, proxyOptions{stripPathPrefix: "/v1", fullLogger: logger, staticAuthorization: provider.DummyToken}), nil
 	case "grok":
 		return grokapi.NewHandler(grokapi.HandlerOpts{Home: provider.Home, BaseURL: provider.BaseURL, Endpoint: endpoint, Logf: logger.Printf})
 	default:

@@ -40,6 +40,7 @@ type proxyOptions struct {
 	codexTransform              bool
 	feedToGrokCLI               bool
 	codexAuthFile               string
+	staticAuthorization         string
 	modelCapabilities           map[string]ModelCapability
 }
 
@@ -54,6 +55,9 @@ func newProxyWithOptions(target *url.URL, modelMap map[string]string, verbose bo
 		req.URL.RawPath = ""
 		if opts.disableWebSocketCompression && isWebSocketRequest(req.Header) {
 			req.Header.Del("Sec-WebSocket-Extensions")
+		}
+		if opts.staticAuthorization != "" {
+			req.Header.Set("Authorization", "Bearer "+opts.staticAuthorization)
 		}
 	}
 

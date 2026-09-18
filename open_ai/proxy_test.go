@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -28,6 +29,35 @@ func (m *mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 		StatusCode: m.statusCode,
 		Body:       io.NopCloser(bytes.NewBuffer(m.body)),
 	}, nil
+}
+
+func TestProxyStaticAuthorizationReplacesIncomingHeader(t *testing.T) {
+	var gotAuthorization string
+	var gotPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuthorization = r.Header.Get("Authorization")
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	target, err := url.Parse(upstream.URL + "/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := newProxyWithOptions(target, nil, false, proxyOptions{stripPathPrefix: "/v1", staticAuthorization: "PROXY_MANAGED"})
+	req := httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer client-token")
+	rec := httptest.NewRecorder()
+	proxy.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+	if gotAuthorization != "Bearer PROXY_MANAGED" {
+		t.Fatalf("Authorization = %q, want placeholder", gotAuthorization)
+	}
+	if gotPath != "/v1/messages" {
+		t.Fatalf("path = %q, want /v1/messages", gotPath)
+	}
 }
 
 func TestLoggingTransport_RoundTrip(t *testing.T) {

@@ -80,7 +80,9 @@ configuration.
 
 `subscription: true` uses the built-in endpoint for the provider when
 `baseUrl` is absent. A provider with `subscription: false` must declare
-`baseUrl`.
+`baseUrl`. `kind: "http-proxy"` forwards requests to that URL without
+subscription transformations and may declare `dummyToken`; when present, it is
+sent upstream as a replacement `Authorization: Bearer` placeholder.
 
 Variants inherit the base model's protocol, provider, provider model name, and
 behavior. A model or variant may also define `displayName`, `input`,
