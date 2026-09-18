@@ -51,7 +51,7 @@ Options:
   --instructions TEXT         system instructions sent with the prompt
   --client-version VERSION    Codex client version header (default: ~/.codex/models_cache.json or 0.131.0)
   --timeout DURATION          request timeout (default: 2m)
-  --log FILE                  append detailed request/response logs to FILE
+  --log FILE                  append detailed request/response logs to FILE (rotates hourly; FILE is a current-segment symlink)
   --no-newline                do not append a newline after streamed output
   -v,--verbose                print connection details to stderr
   -h,--help                   show help

@@ -158,10 +158,11 @@ llm-proxy --codex --feed-to-grok-cli --port 8891
 See [Grok CLI compatibility](../docs/codex/grok-cli.md) for the session-resume
 behavior, model catalog response, and opt-in scope.
 
-Append full proxy logs while keeping terminal output brief:
+Append full proxy logs while keeping terminal output brief. The requested path is a symlink to an hourly log segment; the current and preceding hour are retained. Use `tail -F` to follow rotations:
 
 ```sh
 llm-proxy --codex --port 8891 --log proxy.log
+tail -F proxy.log
 ```
 
 Configure Codex with the built-in OpenAI provider:

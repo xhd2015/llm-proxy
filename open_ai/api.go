@@ -46,7 +46,8 @@ Options:
                                    a compatibility workaround for strict clients such as Grok Build
   -v,--verbose                     show verbose info
   --log FILE                       append full proxy logs to FILE while keeping terminal logs brief
-                                   (default: /tmp/llm-proxy.log; --log=off disables file logging)
+                                   (rotates hourly; FILE is a symlink to the current segment;
+                                   default: /tmp/llm-proxy.log; --log=off disables file logging)
   --color                          force color output on
   --no-color                       force color output off (NO_COLOR env also disables in auto)
   --open-ai                        start a local proxy to OpenAI with usage tracking
