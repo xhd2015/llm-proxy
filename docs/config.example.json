@@ -1,0 +1,63 @@
+{
+  "listen": "127.0.0.1:8890",
+  "log": "/tmp/llm-proxy.log",
+  "providers": [
+    {
+      "name": "commandcode",
+      "kind": "commandcode",
+      "subscription": true,
+      "home": "~/.commandcode"
+    },
+    {
+      "name": "codex",
+      "kind": "codex",
+      "subscription": true,
+      "authFile": "~/.codex/auth.json"
+    },
+    {
+      "name": "grok",
+      "kind": "grok",
+      "subscription": true,
+      "home": "~/.grok"
+    }
+  ],
+  "models": [
+    {
+      "protocol": "anthropic-messages",
+      "provider": "commandcode",
+      "providerModelName": "deepseek/deepseek-v4.1-flash",
+      "clientModelName": "deepseek-v4.1-flash",
+      "effortMapping": {
+        "low": "low",
+        "medium": "high",
+        "high": "high",
+        "xhigh": "max",
+        "max": "max"
+      },
+      "variants": [
+        {
+          "agentRunners": ["dsh"],
+          "clientModelName": "deepseek-v4.1-flash-from-dsh",
+          "adjustUsageForDSH": true
+        }
+      ]
+    },
+    {
+      "protocol": "openai-responses",
+      "provider": "codex",
+      "providerModelName": "gpt-5.6-terra",
+      "variants": [
+        {
+          "agentRunners": ["grok"],
+          "clientModelName": "gpt-5.6-terra-from-grok",
+          "feedToGrokCli": true
+        }
+      ]
+    },
+    {
+      "protocol": "openai-responses",
+      "provider": "grok",
+      "providerModelName": "grok-4.6"
+    }
+  ]
+}

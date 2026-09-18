@@ -23,6 +23,8 @@ type Options struct {
 	BaseURL string
 	// Port is the loopback listen port (default DefaultPort).
 	Port int
+	// Endpoint is the public catalog base URL. It defaults from Port when empty.
+	Endpoint string
 	// Verbose logs every proxied request.
 	Verbose bool
 	// HTTP is the client used for upstream calls.
@@ -41,8 +43,8 @@ type Options struct {
 	AdjustUsageForDSH map[string]bool
 }
 
-// Start validates credentials and serves the proxy until the process stops.
-func Start(opts Options) error {
+// NewHandler validates credentials and returns the Command Code HTTP handler.
+func NewHandler(opts Options) (http.Handler, error) {
 	if opts.Home == "" {
 		opts.Home = DefaultHome()
 	}
@@ -52,18 +54,12 @@ func Start(opts Options) error {
 	if opts.BaseURL == "" {
 		opts.BaseURL = DefaultBaseURL
 	}
-	if opts.Port == 0 {
-		opts.Port = DefaultPort
-	}
 
 	// Fail fast on missing credentials rather than on the first client request.
-	auth, err := ReadAuth(opts.Home)
-	if err != nil {
-		return err
+	if _, err := ReadAuth(opts.Home); err != nil {
+		return nil, err
 	}
-	authPath, _ := AuthPath(opts.Home)
 
-	endpoint := fmt.Sprintf("http://localhost:%d/v1", opts.Port)
 	h := &handler{
 		client: &Client{
 			BaseURL: opts.BaseURL,
@@ -72,19 +68,34 @@ func Start(opts Options) error {
 			HTTP:    opts.HTTP,
 		},
 		opts:     opts,
-		endpoint: endpoint,
+		endpoint: opts.Endpoint,
 	}
+	return h.routes(), nil
+}
 
-	mux := h.routes()
+// Start validates credentials and serves the proxy until the process stops.
+func Start(opts Options) error {
+	if opts.Port == 0 {
+		opts.Port = DefaultPort
+	}
+	if opts.Endpoint == "" {
+		opts.Endpoint = fmt.Sprintf("http://localhost:%d/v1", opts.Port)
+	}
+	h, err := NewHandler(opts)
+	if err != nil {
+		return err
+	}
+	authPath, _ := AuthPath(opts.Home)
+	auth, _ := ReadAuth(opts.Home)
 
-	log.Printf("Command Code proxy running at %s", endpoint)
+	log.Printf("Command Code proxy running at %s", opts.Endpoint)
 	log.Printf("Upstream: %s", opts.BaseURL)
 	log.Printf("Credentials: %s (%s)", authPath, auth.UserName)
 	logEffortMappings(opts.EffortByModel)
 	logAdjustUsageForDSH(opts.AdjustUsageForDSH)
-	printSetup(endpoint)
+	printSetup(opts.Endpoint)
 
-	return http.ListenAndServe(fmt.Sprintf("localhost:%d", opts.Port), mux)
+	return http.ListenAndServe(fmt.Sprintf("localhost:%d", opts.Port), h)
 }
 
 // printSetup prints the Grok CLI configuration a user needs to run the proxy.

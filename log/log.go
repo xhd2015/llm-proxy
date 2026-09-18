@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/xhd2015/dot-pkgs/go-pkgs/pathfmt"
 )
 
 type Logger struct {
@@ -112,17 +114,7 @@ func ExpandPath(path string) (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("empty path")
 	}
-	if path == "~" || strings.HasPrefix(path, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		if path == "~" {
-			return home, nil
-		}
-		return filepath.Join(home, path[2:]), nil
-	}
-	return path, nil
+	return pathfmt.Expand(path), nil
 }
 
 type rotatingWriter struct {

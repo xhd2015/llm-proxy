@@ -21,9 +21,11 @@ const usageLogFile = "usages.log"
 const help = `
 llm-proxy help to proxy llm requests
 
-Usage: llm-proxy [OPTIONS]
+Usage: llm-proxy [OPTIONS] [COMMAND]
 
 Options:
+  --config FILE                     serve all configured model routes on one listener
+  --check-config                    validate --config and exit
   --base-url URL                   base url to proxy
   --model FROM=TO                  remapping models, can be repeated
   --model-alias ALIAS=UPSTREAM     map a friendly client-facing model name to the id the
@@ -67,9 +69,10 @@ Options:
                                    Grok CLI session (cli-chat-proxy.grok.com)
   --grok-home DIR                  Grok config dir holding auth.json
                                    (default: ~/.grok)
-  codex-models                    print grok config.toml blocks for all Codex models
-  commandcode-models              print grok config.toml blocks for all Command Code models
-  grok-models                     print Codex config.toml blocks for Grok models
+  codex-models                    print Codex model configuration; with --config, use configured routes
+  commandcode-models              print Grok configuration for Command Code models
+  grok-models                     print Grok model configuration; with --config, use configured routes
+  dsh-models                      print Deepseek Harness configuration from --config routes
 
 Examples:
    llm-proxy --base-url http://localhost:8081 --model model-alias=actual-model
@@ -85,9 +88,9 @@ Examples:
 
    llm-proxy --proxy-grok --port 8893
 
+Run llm-proxy <command> --help for command-specific options.
+Run llm-proxy --config FILE <command> --help for configured model output options.
 Run llm-proxy capture --help for capture options.
-Run llm-proxy commandcode-models --help for Command Code model config.
-Run llm-proxy grok-models --help for Grok model config.
 `
 
 type usageRecord struct {
@@ -102,21 +105,8 @@ type usageRecord struct {
 // Handle dispatches a llm-proxy CLI invocation to the doc subcommand, the
 // usage summary, the OpenAI/Codex proxies, or a generic --base-url proxy.
 func Handle(args []string) error {
-	if len(args) > 0 {
-		arg0 := args[0]
-		switch arg0 {
-		case "doc":
-			return handleDoc(args[1:])
-		case "codex-models":
-			return handleCodexModels(args[1:])
-		case "capture":
-			return capture.Handle(args[1:])
-		case "commandcode-models":
-			return handleCommandCodeModels(args[1:])
-		case "grok-models":
-			return handleGrokModels(args[1:])
-		}
-	}
+	var configFile string
+	var checkConfig bool
 	var verbose bool
 	var openAI bool
 	var codex bool
@@ -138,7 +128,9 @@ func Handle(args []string) error {
 	var grokHome string
 	var colorFlag *bool
 	var noColorFlag *bool
-	args, err := flags.String("--base-url", &baseUrl).
+	args, err := flags.String("--config", &configFile).
+		Bool("--check-config", &checkConfig).
+		String("--base-url", &baseUrl).
 		StringSlice("--model", &modelMappings).
 		StringSlice("--model-alias", &modelAliasEntries).
 		StringSlice("--model-capability", &modelCapabilityEntries).
@@ -160,9 +152,57 @@ func Handle(args []string) error {
 		Bool("--codex", &codex).
 		Bool("--usages", &showUsages).
 		Help("-h,--help", help).
+		StopOnFirstArg().
 		Parse(args)
 	if err != nil {
 		return err
+	}
+	if len(args) > 0 {
+		command := args[0]
+		commandArgs := args[1:]
+		if checkConfig {
+			return fmt.Errorf("--check-config cannot be combined with command %q", command)
+		}
+		switch command {
+		case "doc":
+			return handleDoc(commandArgs)
+		case "codex-models":
+			if configFile != "" {
+				return handleConfigModels(configFile, command, commandArgs)
+			}
+			return handleCodexModels(commandArgs)
+		case "capture":
+			return capture.Handle(commandArgs)
+		case "commandcode-models":
+			return handleCommandCodeModels(commandArgs)
+		case "grok-models":
+			if configFile != "" {
+				return handleConfigModels(configFile, command, commandArgs)
+			}
+			return handleGrokModels(commandArgs)
+		case "dsh-models":
+			if configFile == "" {
+				return fmt.Errorf("dsh-models requires --config FILE")
+			}
+			return handleConfigModels(configFile, command, commandArgs)
+		default:
+			if configFile != "" {
+				return fmt.Errorf("unknown --config command: %s", command)
+			}
+			return fmt.Errorf("unrecognized extra args: %s", strings.Join(args, " "))
+		}
+	}
+	if configFile != "" {
+		if openAI || codex || proxyCommandCode || proxyGrok || baseUrl != "" || len(modelMappings) > 0 || len(modelAliasEntries) > 0 || len(modelCapabilityEntries) > 0 || port != "" || logFile != "" || filterTextSnapshot || normalizeAnthropicUsage || feedToGrokCLI || commandCodeHome != "" || commandCodeVersion != "" || noCoalesceThinking || verbose || colorFlag != nil || noColorFlag != nil || showUsages {
+			return fmt.Errorf("--config cannot be combined with other server options")
+		}
+		if len(args) > 0 {
+			return fmt.Errorf("unrecognized extra args: %s", strings.Join(args, " "))
+		}
+		return startConfigProxy(configFile, checkConfig)
+	}
+	if checkConfig {
+		return fmt.Errorf("--check-config requires --config")
 	}
 	if openAI && codex {
 		return fmt.Errorf("--open-ai and --codex cannot be used together")
