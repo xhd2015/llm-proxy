@@ -25,7 +25,6 @@ Usage: llm-proxy [OPTIONS] [COMMAND]
 
 Options:
   --config FILE                     serve all configured model routes on one listener
-  --check-config                    validate --config and exit
   --base-url URL                   base url to proxy
   --model FROM=TO                  remapping models, can be repeated
   --model-alias ALIAS=UPSTREAM     map a friendly client-facing model name to the id the
@@ -72,6 +71,7 @@ Options:
   codex-models                    print Codex model configuration; with --config, use configured routes
   commandcode-models              print Grok configuration for Command Code models
   grok-models                     print Grok model configuration; with --config, use configured routes
+  lint                            validate a configuration file
   dsh-models                      print Deepseek Harness configuration from --config routes
 
 Examples:
@@ -106,7 +106,6 @@ type usageRecord struct {
 // usage summary, the OpenAI/Codex proxies, or a generic --base-url proxy.
 func Handle(args []string) error {
 	var configFile string
-	var checkConfig bool
 	var verbose bool
 	var openAI bool
 	var codex bool
@@ -129,7 +128,6 @@ func Handle(args []string) error {
 	var colorFlag *bool
 	var noColorFlag *bool
 	args, err := flags.String("--config", &configFile).
-		Bool("--check-config", &checkConfig).
 		String("--base-url", &baseUrl).
 		StringSlice("--model", &modelMappings).
 		StringSlice("--model-alias", &modelAliasEntries).
@@ -160,10 +158,9 @@ func Handle(args []string) error {
 	if len(args) > 0 {
 		command := args[0]
 		commandArgs := args[1:]
-		if checkConfig {
-			return fmt.Errorf("--check-config cannot be combined with command %q", command)
-		}
 		switch command {
+		case "lint":
+			return handleConfigLint(configFile, commandArgs, os.Stdout, os.Stderr)
 		case "doc":
 			return handleDoc(commandArgs)
 		case "codex-models":
@@ -181,9 +178,6 @@ func Handle(args []string) error {
 			}
 			return handleGrokModels(commandArgs)
 		case "dsh-models":
-			if configFile == "" {
-				return fmt.Errorf("dsh-models requires --config FILE")
-			}
 			return handleConfigModels(configFile, command, commandArgs)
 		default:
 			if configFile != "" {
@@ -199,10 +193,7 @@ func Handle(args []string) error {
 		if len(args) > 0 {
 			return fmt.Errorf("unrecognized extra args: %s", strings.Join(args, " "))
 		}
-		return startConfigProxy(configFile, checkConfig)
-	}
-	if checkConfig {
-		return fmt.Errorf("--check-config requires --config")
+		return startConfigProxy(configFile)
 	}
 	if openAI && codex {
 		return fmt.Errorf("--open-ai and --codex cannot be used together")

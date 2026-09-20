@@ -149,7 +149,10 @@ func TestGenerateConfigDSHModelsRendersMetadata(t *testing.T) {
 			},
 		},
 	}}
-	output := generateConfigDSHModels("127.0.0.1:8890", routes)
+	output, err := generateConfigDSHModels("127.0.0.1:8890", routes)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, expected := range []string{
 		"name: GPT-5.6 Terra",
 		"input: [ text ]",

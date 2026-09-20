@@ -10,20 +10,25 @@ import (
 
 const configModelsHelp = `
 Usage: llm-proxy --config FILE {codex-models|grok-models|dsh-models}
+       llm-proxy dsh-models --config FILE
 
 Print model configuration selected for the named agent runner.
 
 Options:
+  --config FILE  read configured model routes
   -h, --help    show this help
 `
 
 func handleConfigModels(path, command string, args []string) error {
-	args, err := flags.Help("-h,--help", configModelsHelp).Parse(args)
+	args, err := flags.String("--config", &path).Help("-h,--help", configModelsHelp).Parse(args)
 	if err != nil {
 		return err
 	}
 	if len(args) > 0 {
 		return fmt.Errorf("unrecognized extra args: %s", strings.Join(args, " "))
+	}
+	if path == "" {
+		return fmt.Errorf("%s requires --config FILE", command)
 	}
 	config, routes, err := loadProxyConfig(path)
 	if err != nil {
@@ -39,7 +44,11 @@ func handleConfigModels(path, command string, args []string) error {
 	case "grok":
 		fmt.Print(generateConfigGrokModels(endpoint, routes))
 	case "dsh":
-		fmt.Print(generateConfigDSHModels(config.Listen, routes))
+		output, err := generateConfigDSHModels(config.Listen, routes)
+		if err != nil {
+			return err
+		}
+		fmt.Print(output)
 	default:
 		return fmt.Errorf("unsupported agent runner %q", runner)
 	}
@@ -111,14 +120,27 @@ type dshProviderGroup struct {
 	routes    []effectiveRoute
 }
 
-func generateConfigDSHModels(listen string, routes []effectiveRoute) string {
+func generateConfigDSHModels(listen string, routes []effectiveRoute) (string, error) {
 	if len(routes) == 0 {
-		return "# No external routes are configured for Deepseek Harness.\n"
+		return "# No external routes are configured for Deepseek Harness.\n", nil
+	}
+	for _, route := range routes {
+		if len(route.input) == 0 {
+			return "", fmt.Errorf("model %q: DSH export requires at least one enabled input", route.clientModelName)
+		}
 	}
 	groups := groupDSHRoutes(routes)
+	seen := make(map[string]bool)
+	for _, group := range groups {
+		if seen[group.name] {
+			return "", fmt.Errorf("DSH provider name %q collides; rename the configured provider", group.name)
+		}
+		seen[group.name] = true
+	}
 	base := "http://" + strings.Replace(listen, "localhost", "127.0.0.1", 1)
 	var out strings.Builder
-	fmt.Fprintln(&out, "llm-pi-ai:")
+	fmt.Fprintln(&out, "# Store a non-empty placeholder for each apiKeyEnv in DSH credentials or the environment.")
+	fmt.Fprintln(&out, "llm-proxy-providers:")
 	fmt.Fprintln(&out, "  providers:")
 	for _, group := range groups {
 		baseURL := base
@@ -127,7 +149,7 @@ func generateConfigDSHModels(listen string, routes []effectiveRoute) string {
 		}
 		writeDSHProvider(&out, group, baseURL)
 	}
-	return out.String()
+	return out.String(), nil
 }
 
 func groupDSHRoutes(routes []effectiveRoute) []dshProviderGroup {
@@ -148,10 +170,7 @@ func groupDSHRoutes(routes []effectiveRoute) []dshProviderGroup {
 		parts := strings.Split(key, "\x00")
 		group.name = "llm-proxy-" + parts[0]
 		if providerProtocolCounts[parts[0]] > 1 {
-			backend := "messages"
-			if parts[1] == "openai-responses" {
-				backend = "responses"
-			}
+			backend := parts[1]
 			group.name += "-" + backend
 		}
 		group.reasoning = sharedDSHReasoning(group.routes)
@@ -213,6 +232,16 @@ func dshProviderDisplayName(provider configProvider) string {
 func writeDSHProvider(out *strings.Builder, group dshProviderGroup, baseURL string) {
 	fmt.Fprintf(out, "    %s:\n", group.name)
 	fmt.Fprintf(out, "      displayName: %s (llm-proxy)\n", group.display)
+	credential := strings.Map(func(r rune) rune {
+		if r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			return r
+		}
+		return '_'
+	}, strings.ToUpper(group.routes[0].provider.Name)) + "_API_KEY"
+	if credential[0] >= '0' && credential[0] <= '9' {
+		credential = "LLM_PROXY_" + credential
+	}
+	fmt.Fprintf(out, "      apiKeyEnv: %s\n", credential)
 	fmt.Fprintf(out, "      api: %s\n", group.protocol)
 	fmt.Fprintf(out, "      baseURL: %s\n", baseURL)
 	if group.reasoning != "" {

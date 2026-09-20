@@ -3,6 +3,7 @@ package openai
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -35,6 +36,11 @@ type configProvider struct {
 	DummyToken   string `json:"dummyToken"`
 }
 
+type configInput struct {
+	Type     string `json:"type"`
+	Disabled bool   `json:"disabled,omitempty"`
+}
+
 type configReasoning struct {
 	Disabled       bool               `json:"disabled"`
 	DefaultEffort  string             `json:"defaultEffort"`
@@ -47,7 +53,7 @@ type configModel struct {
 	ProviderModelName string            `json:"providerModelName"`
 	ClientModelName   string            `json:"clientModelName"`
 	DisplayName       string            `json:"displayName"`
-	Input             []string          `json:"input"`
+	Inputs            []configInput     `json:"inputs"`
 	ContextWindow     *int              `json:"contextWindow"`
 	MaxTokens         *int              `json:"maxTokens"`
 	Compat            map[string]bool   `json:"compat"`
@@ -63,7 +69,7 @@ type configVariant struct {
 	ClientModelName   string            `json:"clientModelName"`
 	AgentRunners      []string          `json:"agentRunners"`
 	DisplayName       string            `json:"displayName"`
-	Input             []string          `json:"input"`
+	Inputs            []configInput     `json:"inputs"`
 	ContextWindow     *int              `json:"contextWindow"`
 	MaxTokens         *int              `json:"maxTokens"`
 	Compat            map[string]bool   `json:"compat"`
@@ -95,30 +101,42 @@ type effectiveRoute struct {
 }
 
 func loadProxyConfig(path string) (proxyConfig, []effectiveRoute, error) {
+	config, routes, diagnostics := inspectProxyConfig(path)
+	return config, routes, diagnosticErrors(diagnostics)
+}
+
+func inspectProxyConfig(path string) (proxyConfig, []effectiveRoute, []configDiagnostic) {
 	expanded, err := logutil.ExpandPath(path)
 	if err != nil {
-		return proxyConfig{}, nil, err
+		return proxyConfig{}, nil, []configDiagnostic{{"error", "$", err.Error()}}
 	}
-	file, err := os.Open(expanded)
+	data, err := os.ReadFile(expanded)
 	if err != nil {
-		return proxyConfig{}, nil, err
+		return proxyConfig{}, nil, []configDiagnostic{{"error", "$", err.Error()}}
 	}
-	defer file.Close()
-	decoder := json.NewDecoder(file)
-	decoder.DisallowUnknownFields()
+	diagnostics := inspectConfigJSON(data)
 	var config proxyConfig
-	if err := decoder.Decode(&config); err != nil {
-		return proxyConfig{}, nil, err
-	}
-	if decoder.Decode(&struct{}{}) != io.EOF {
-		return proxyConfig{}, nil, fmt.Errorf("configuration contains more than one JSON value")
+	if err := json.Unmarshal(data, &config); err != nil {
+		return proxyConfig{}, nil, diagnostics
 	}
 	config = normalizeProxyConfig(config)
 	routes, err := validateProxyConfig(config)
 	if err != nil {
-		return proxyConfig{}, nil, err
+		for _, message := range strings.Split(err.Error(), "\n") {
+			path, detail, found := strings.Cut(message, ": ")
+			if !found {
+				path, detail = "$", message
+			}
+			diagnostics = append(diagnostics, configDiagnostic{"error", path, detail})
+		}
 	}
-	return config, routes, nil
+	sort.SliceStable(diagnostics, func(i, j int) bool {
+		if diagnostics[i].path != diagnostics[j].path {
+			return diagnostics[i].path < diagnostics[j].path
+		}
+		return diagnostics[i].message < diagnostics[j].message
+	})
+	return config, routes, diagnostics
 }
 
 func normalizeProxyConfig(config proxyConfig) proxyConfig {
@@ -131,39 +149,45 @@ func normalizeProxyConfig(config proxyConfig) proxyConfig {
 }
 
 func validateProxyConfig(config proxyConfig) ([]effectiveRoute, error) {
+	var failures []error
 	if strings.TrimSpace(config.Listen) == "" {
-		return nil, fmt.Errorf("listen is required")
+		failures = append(failures, fmt.Errorf("listen: is required"))
 	}
 	providers := make(map[string]configProvider, len(config.Providers))
+	invalidProviders := make(map[string]bool)
 	for i, provider := range config.Providers {
+		before := len(failures)
 		where := fmt.Sprintf("providers[%d]", i)
 		if provider.Name == "" || provider.Kind == "" {
-			return nil, fmt.Errorf("%s: name and kind are required", where)
+			failures = append(failures, fmt.Errorf("%s: name and kind are required", where))
 		}
 		if _, exists := providers[provider.Name]; exists {
-			return nil, fmt.Errorf("%s: duplicate provider name %q", where, provider.Name)
+			failures = append(failures, fmt.Errorf("%s: duplicate provider name %q", where, provider.Name))
 		}
 		if provider.Kind != "commandcode" && provider.Kind != "codex" && provider.Kind != "grok" && provider.Kind != "http-proxy" {
-			return nil, fmt.Errorf("%s: unsupported provider kind %q", where, provider.Kind)
+			failures = append(failures, fmt.Errorf("%s: unsupported provider kind %q", where, provider.Kind))
 		}
 		if provider.DummyToken != "" && provider.Kind != "http-proxy" {
-			return nil, fmt.Errorf("%s: dummyToken is only supported by http-proxy providers", where)
+			failures = append(failures, fmt.Errorf("%s: dummyToken is only supported by http-proxy providers", where))
 		}
 		if provider.Kind == "http-proxy" && strings.TrimSpace(provider.DummyToken) != provider.DummyToken {
-			return nil, fmt.Errorf("%s: dummyToken must not have surrounding whitespace", where)
+			failures = append(failures, fmt.Errorf("%s: dummyToken must not have surrounding whitespace", where))
 		}
 		if !provider.Subscription && provider.BaseURL == "" {
-			return nil, fmt.Errorf("%s: baseUrl is required when subscription is false", where)
+			failures = append(failures, fmt.Errorf("%s: baseUrl is required when subscription is false", where))
 		}
 		if provider.BaseURL != "" {
 			if _, err := url.ParseRequestURI(provider.BaseURL); err != nil {
-				return nil, fmt.Errorf("%s: invalid baseUrl: %w", where, err)
+				failures = append(failures, fmt.Errorf("%s: invalid baseUrl: %w", where, err))
 			}
 		}
 		providers[provider.Name] = provider
+		if len(failures) > before {
+			invalidProviders[provider.Name] = true
+		}
 	}
-	if len(providers) == 0 {
-		return nil, fmt.Errorf("providers must not be empty")
+	if len(config.Providers) == 0 {
+		failures = append(failures, fmt.Errorf("providers: must not be empty"))
 	}
 
 	routes := make([]effectiveRoute, 0, len(config.Models))
@@ -171,45 +195,49 @@ func validateProxyConfig(config proxyConfig) ([]effectiveRoute, error) {
 	for i, model := range config.Models {
 		where := fmt.Sprintf("models[%d]", i)
 		if model.Protocol != "anthropic-messages" && model.Protocol != "openai-responses" {
-			return nil, fmt.Errorf("%s: unsupported protocol %q", where, model.Protocol)
+			failures = append(failures, fmt.Errorf("%s: unsupported protocol %q", where, model.Protocol))
 		}
 		provider, ok := providers[model.Provider]
-		if !ok {
-			return nil, fmt.Errorf("%s: unknown provider %q", where, model.Provider)
+		if !ok && !invalidProviders[model.Provider] {
+			failures = append(failures, fmt.Errorf("%s: unknown provider %q", where, model.Provider))
 		}
-		if provider.Kind == "commandcode" && model.Protocol != "anthropic-messages" {
-			return nil, fmt.Errorf("%s: commandcode requires anthropic-messages", where)
+		if !invalidProviders[model.Provider] && provider.Kind == "commandcode" && model.Protocol == "openai-responses" {
+			failures = append(failures, fmt.Errorf("%s: commandcode requires anthropic-messages", where))
 		}
-		if (provider.Kind == "codex" || provider.Kind == "grok") && model.Protocol != "openai-responses" {
-			return nil, fmt.Errorf("%s: %s requires openai-responses", where, provider.Kind)
+		if !invalidProviders[model.Provider] && (provider.Kind == "codex" || provider.Kind == "grok") && model.Protocol == "anthropic-messages" {
+			failures = append(failures, fmt.Errorf("%s: %s requires openai-responses", where, provider.Kind))
 		}
 		if model.ProviderModelName == "" {
-			return nil, fmt.Errorf("%s: providerModelName is required", where)
+			failures = append(failures, fmt.Errorf("%s: providerModelName is required", where))
 		}
-		if err := validateModelMetadata(model.DisplayName, model.Input, model.ContextWindow, model.MaxTokens, where); err != nil {
-			return nil, err
+		if err := validateModelMetadata(model.DisplayName, model.Inputs, model.ContextWindow, model.MaxTokens, where); err != nil {
+			failures = append(failures, err)
 		}
 		if err := validateReasoning(model.Reasoning, where, true); err != nil {
-			return nil, err
+			failures = append(failures, err)
 		}
 		baseName := model.ClientModelName
 		if baseName == "" {
 			baseName = model.ProviderModelName
 		}
-		base := effectiveRoute{protocol: model.Protocol, clientModelName: baseName, providerModelName: model.ProviderModelName, provider: provider, displayName: model.DisplayName, input: append([]string(nil), model.Input...), contextWindow: model.ContextWindow, maxTokens: model.MaxTokens, compat: cloneBoolMap(model.Compat), reasoning: cloneReasoning(*model.Reasoning), noImage: boolValue(model.NoImage), adjustUsageForDSH: boolValue(model.AdjustUsageForDSH), feedToGrokCli: boolValue(model.FeedToGrokCli), effortMapping: model.EffortMapping, modelIndex: i}
+		var reasoning configReasoning
+		if model.Reasoning != nil {
+			reasoning = cloneReasoning(*model.Reasoning)
+		}
+		base := effectiveRoute{protocol: model.Protocol, clientModelName: baseName, providerModelName: model.ProviderModelName, provider: provider, displayName: model.DisplayName, input: resolveInputs(model.Inputs), contextWindow: model.ContextWindow, maxTokens: model.MaxTokens, compat: cloneBoolMap(model.Compat), reasoning: reasoning, noImage: boolValue(model.NoImage), adjustUsageForDSH: boolValue(model.AdjustUsageForDSH), feedToGrokCli: boolValue(model.FeedToGrokCli), effortMapping: model.EffortMapping, modelIndex: i}
 		if err := addConfigRoute(&routes, seenNames, base, where); err != nil {
-			return nil, err
+			failures = append(failures, err)
 		}
 		for j, variant := range model.Variants {
 			variantWhere := fmt.Sprintf("%s.variants[%d]", where, j)
 			if err := validateAgentRunners(variant.AgentRunners, variantWhere); err != nil {
-				return nil, err
+				failures = append(failures, err)
 			}
-			if err := validateModelMetadata(variant.DisplayName, variant.Input, variant.ContextWindow, variant.MaxTokens, variantWhere); err != nil {
-				return nil, err
+			if err := validateModelMetadata(variant.DisplayName, variant.Inputs, variant.ContextWindow, variant.MaxTokens, variantWhere); err != nil {
+				failures = append(failures, err)
 			}
 			if err := validateReasoning(variant.Reasoning, variantWhere, false); err != nil {
-				return nil, err
+				failures = append(failures, err)
 			}
 			route := base
 			route.isVariant = true
@@ -220,8 +248,8 @@ func validateProxyConfig(config proxyConfig) ([]effectiveRoute, error) {
 			if variant.DisplayName != "" {
 				route.displayName = variant.DisplayName
 			}
-			if variant.Input != nil {
-				route.input = append([]string(nil), variant.Input...)
+			if variant.Inputs != nil {
+				route.input = resolveInputs(variant.Inputs)
 			}
 			if variant.ContextWindow != nil {
 				route.contextWindow = variant.ContextWindow
@@ -248,12 +276,15 @@ func validateProxyConfig(config proxyConfig) ([]effectiveRoute, error) {
 				route.effortMapping = variant.EffortMapping
 			}
 			if err := addConfigRoute(&routes, seenNames, route, variantWhere); err != nil {
-				return nil, err
+				failures = append(failures, err)
 			}
 		}
 	}
-	if len(routes) == 0 {
-		return nil, fmt.Errorf("models must not be empty")
+	if len(config.Models) == 0 {
+		failures = append(failures, fmt.Errorf("models: must not be empty"))
+	}
+	if len(failures) > 0 {
+		return nil, errors.Join(failures...)
 	}
 	return routes, nil
 }
@@ -267,22 +298,42 @@ func addConfigRoute(routes *[]effectiveRoute, seen map[string]string, route effe
 	return nil
 }
 
-func validateModelMetadata(displayName string, input []string, contextWindow, maxTokens *int, where string) error {
-	if displayName != "" && strings.TrimSpace(displayName) == "" {
-		return fmt.Errorf("%s: displayName must not be blank", where)
+func resolveInputs(inputs []configInput) []string {
+	if len(inputs) == 0 {
+		return []string{"text", "image"}
 	}
-	for _, modality := range input {
+	result := make([]string, 0, len(inputs))
+	for _, input := range inputs {
+		if !input.Disabled {
+			result = append(result, input.Type)
+		}
+	}
+	return result
+}
+
+func validateModelMetadata(displayName string, input []configInput, contextWindow, maxTokens *int, where string) error {
+	var failures []error
+	if displayName != "" && strings.TrimSpace(displayName) == "" {
+		failures = append(failures, fmt.Errorf("%s: displayName must not be blank", where))
+	}
+	seen := make(map[string]bool)
+	for _, entry := range input {
+		modality := entry.Type
+		if seen[modality] {
+			failures = append(failures, fmt.Errorf("%s: duplicate input modality %q", where, modality))
+		}
+		seen[modality] = true
 		if modality != "text" && modality != "image" {
-			return fmt.Errorf("%s: unsupported input modality %q", where, modality)
+			failures = append(failures, fmt.Errorf("%s: unsupported input modality %q", where, modality))
 		}
 	}
 	if contextWindow != nil && *contextWindow <= 0 {
-		return fmt.Errorf("%s: contextWindow must be positive", where)
+		failures = append(failures, fmt.Errorf("%s: contextWindow must be positive", where))
 	}
 	if maxTokens != nil && *maxTokens <= 0 {
-		return fmt.Errorf("%s: maxTokens must be positive", where)
+		failures = append(failures, fmt.Errorf("%s: maxTokens must be positive", where))
 	}
-	return nil
+	return errors.Join(failures...)
 }
 
 func validReasoningEffort(effort string) bool {
@@ -316,15 +367,16 @@ func validateReasoning(reasoning *configReasoning, where string, required bool) 
 	if _, exists := reasoning.EffortsMapping[reasoning.DefaultEffort]; !exists {
 		return fmt.Errorf("%s: defaultEffort %q is not in effortsMapping", where, reasoning.DefaultEffort)
 	}
+	var failures []error
 	for effort, mapped := range reasoning.EffortsMapping {
 		if !validReasoningEffort(effort) {
-			return fmt.Errorf("%s: unsupported reasoning effort %q", where, effort)
+			failures = append(failures, fmt.Errorf("%s: unsupported reasoning effort %q", where, effort))
 		}
 		if mapped != nil && !validReasoningEffort(*mapped) {
-			return fmt.Errorf("%s: unsupported reasoning effort value %q", where, *mapped)
+			failures = append(failures, fmt.Errorf("%s: unsupported reasoning effort value %q", where, *mapped))
 		}
 	}
-	return nil
+	return errors.Join(failures...)
 }
 
 func cloneReasoning(reasoning configReasoning) configReasoning {
@@ -376,17 +428,18 @@ func cloneStringPointerMap(values map[string]*string) map[string]*string {
 func boolValue(value *bool) bool { return value != nil && *value }
 
 func validateAgentRunners(runners []string, where string) error {
+	var failures []error
 	seen := make(map[string]bool, len(runners))
 	for _, runner := range runners {
 		if runner != "codex" && runner != "grok" && runner != "dsh" {
-			return fmt.Errorf("%s: unsupported agentRunner %q", where, runner)
+			failures = append(failures, fmt.Errorf("%s: unsupported agentRunner %q", where, runner))
 		}
 		if seen[runner] {
-			return fmt.Errorf("%s: duplicate agentRunner %q", where, runner)
+			failures = append(failures, fmt.Errorf("%s: duplicate agentRunner %q", where, runner))
 		}
 		seen[runner] = true
 	}
-	return nil
+	return errors.Join(failures...)
 }
 
 func routesForAgentRunner(routes []effectiveRoute, runner string) []effectiveRoute {
@@ -431,14 +484,10 @@ func containsString(values []string, target string) bool {
 	return false
 }
 
-func startConfigProxy(path string, checkOnly bool) error {
+func startConfigProxy(path string) error {
 	config, routes, err := loadProxyConfig(path)
 	if err != nil {
 		return fmt.Errorf("load --config: %w", err)
-	}
-	if checkOnly {
-		fmt.Printf("config valid: %d model routes, %d providers\n", len(routes), len(config.Providers))
-		return nil
 	}
 	logPath, _ := logutil.ResolveLogFile(config.Log)
 	logger, closer, err := logutil.OpenAppend(logPath)
