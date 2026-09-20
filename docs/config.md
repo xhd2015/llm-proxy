@@ -86,7 +86,10 @@ sent upstream as a replacement `Authorization: Bearer` placeholder.
 
 Variants inherit the base model's protocol, provider, provider model name, and
 behavior. A model or variant may also define `displayName`, `input`,
-`contextWindow`, `maxTokens`, `compat`, and `reasoningEfforts`; variants merge
+`contextWindow`, `maxTokens`, `compat`, and `reasoning`. `reasoning` is a
+required base-model object with `disabled`, and, when enabled,
+`defaultEffort` plus `effortsMapping`. Variants replace the complete reasoning
+object when they define one and inherit it when omitted. Variants merge
 `compat` and inherit every omitted metadata field. A variant may override
 `clientModelName`, `noImage`, `adjustUsageForDSH`, `feedToGrokCli`, and
 `effortMapping`. `agentRunners` may

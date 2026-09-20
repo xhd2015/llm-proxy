@@ -35,37 +35,43 @@ type configProvider struct {
 	DummyToken   string `json:"dummyToken"`
 }
 
+type configReasoning struct {
+	Disabled       bool               `json:"disabled"`
+	DefaultEffort  string             `json:"defaultEffort"`
+	EffortsMapping map[string]*string `json:"effortsMapping"`
+}
+
 type configModel struct {
-	Protocol          string             `json:"protocol"`
-	Provider          string             `json:"provider"`
-	ProviderModelName string             `json:"providerModelName"`
-	ClientModelName   string             `json:"clientModelName"`
-	DisplayName       string             `json:"displayName"`
-	Input             []string           `json:"input"`
-	ContextWindow     *int               `json:"contextWindow"`
-	MaxTokens         *int               `json:"maxTokens"`
-	Compat            map[string]bool    `json:"compat"`
-	ReasoningEfforts  map[string]*string `json:"reasoningEfforts"`
-	NoImage           *bool              `json:"noImage"`
-	AdjustUsageForDSH *bool              `json:"adjustUsageForDSH"`
-	FeedToGrokCli     *bool              `json:"feedToGrokCli"`
-	EffortMapping     map[string]string  `json:"effortMapping"`
-	Variants          []configVariant    `json:"variants"`
+	Protocol          string            `json:"protocol"`
+	Provider          string            `json:"provider"`
+	ProviderModelName string            `json:"providerModelName"`
+	ClientModelName   string            `json:"clientModelName"`
+	DisplayName       string            `json:"displayName"`
+	Input             []string          `json:"input"`
+	ContextWindow     *int              `json:"contextWindow"`
+	MaxTokens         *int              `json:"maxTokens"`
+	Compat            map[string]bool   `json:"compat"`
+	Reasoning         *configReasoning  `json:"reasoning"`
+	NoImage           *bool             `json:"noImage"`
+	AdjustUsageForDSH *bool             `json:"adjustUsageForDSH"`
+	FeedToGrokCli     *bool             `json:"feedToGrokCli"`
+	EffortMapping     map[string]string `json:"effortMapping"`
+	Variants          []configVariant   `json:"variants"`
 }
 
 type configVariant struct {
-	ClientModelName   string             `json:"clientModelName"`
-	AgentRunners      []string           `json:"agentRunners"`
-	DisplayName       string             `json:"displayName"`
-	Input             []string           `json:"input"`
-	ContextWindow     *int               `json:"contextWindow"`
-	MaxTokens         *int               `json:"maxTokens"`
-	Compat            map[string]bool    `json:"compat"`
-	ReasoningEfforts  map[string]*string `json:"reasoningEfforts"`
-	NoImage           *bool              `json:"noImage"`
-	AdjustUsageForDSH *bool              `json:"adjustUsageForDSH"`
-	FeedToGrokCli     *bool              `json:"feedToGrokCli"`
-	EffortMapping     map[string]string  `json:"effortMapping"`
+	ClientModelName   string            `json:"clientModelName"`
+	AgentRunners      []string          `json:"agentRunners"`
+	DisplayName       string            `json:"displayName"`
+	Input             []string          `json:"input"`
+	ContextWindow     *int              `json:"contextWindow"`
+	MaxTokens         *int              `json:"maxTokens"`
+	Compat            map[string]bool   `json:"compat"`
+	Reasoning         *configReasoning  `json:"reasoning"`
+	NoImage           *bool             `json:"noImage"`
+	AdjustUsageForDSH *bool             `json:"adjustUsageForDSH"`
+	FeedToGrokCli     *bool             `json:"feedToGrokCli"`
+	EffortMapping     map[string]string `json:"effortMapping"`
 }
 
 type effectiveRoute struct {
@@ -82,7 +88,7 @@ type effectiveRoute struct {
 	contextWindow     *int
 	maxTokens         *int
 	compat            map[string]bool
-	reasoningEfforts  map[string]*string
+	reasoning         configReasoning
 	modelIndex        int
 	isVariant         bool
 	agentRunners      []string
@@ -180,14 +186,17 @@ func validateProxyConfig(config proxyConfig) ([]effectiveRoute, error) {
 		if model.ProviderModelName == "" {
 			return nil, fmt.Errorf("%s: providerModelName is required", where)
 		}
-		if err := validateModelMetadata(model.DisplayName, model.Input, model.ContextWindow, model.MaxTokens, model.ReasoningEfforts, where); err != nil {
+		if err := validateModelMetadata(model.DisplayName, model.Input, model.ContextWindow, model.MaxTokens, where); err != nil {
+			return nil, err
+		}
+		if err := validateReasoning(model.Reasoning, where, true); err != nil {
 			return nil, err
 		}
 		baseName := model.ClientModelName
 		if baseName == "" {
 			baseName = model.ProviderModelName
 		}
-		base := effectiveRoute{protocol: model.Protocol, clientModelName: baseName, providerModelName: model.ProviderModelName, provider: provider, displayName: model.DisplayName, input: append([]string(nil), model.Input...), contextWindow: model.ContextWindow, maxTokens: model.MaxTokens, compat: cloneBoolMap(model.Compat), reasoningEfforts: cloneStringPointerMap(model.ReasoningEfforts), noImage: boolValue(model.NoImage), adjustUsageForDSH: boolValue(model.AdjustUsageForDSH), feedToGrokCli: boolValue(model.FeedToGrokCli), effortMapping: model.EffortMapping, modelIndex: i}
+		base := effectiveRoute{protocol: model.Protocol, clientModelName: baseName, providerModelName: model.ProviderModelName, provider: provider, displayName: model.DisplayName, input: append([]string(nil), model.Input...), contextWindow: model.ContextWindow, maxTokens: model.MaxTokens, compat: cloneBoolMap(model.Compat), reasoning: cloneReasoning(*model.Reasoning), noImage: boolValue(model.NoImage), adjustUsageForDSH: boolValue(model.AdjustUsageForDSH), feedToGrokCli: boolValue(model.FeedToGrokCli), effortMapping: model.EffortMapping, modelIndex: i}
 		if err := addConfigRoute(&routes, seenNames, base, where); err != nil {
 			return nil, err
 		}
@@ -196,7 +205,10 @@ func validateProxyConfig(config proxyConfig) ([]effectiveRoute, error) {
 			if err := validateAgentRunners(variant.AgentRunners, variantWhere); err != nil {
 				return nil, err
 			}
-			if err := validateModelMetadata(variant.DisplayName, variant.Input, variant.ContextWindow, variant.MaxTokens, variant.ReasoningEfforts, variantWhere); err != nil {
+			if err := validateModelMetadata(variant.DisplayName, variant.Input, variant.ContextWindow, variant.MaxTokens, variantWhere); err != nil {
+				return nil, err
+			}
+			if err := validateReasoning(variant.Reasoning, variantWhere, false); err != nil {
 				return nil, err
 			}
 			route := base
@@ -220,8 +232,8 @@ func validateProxyConfig(config proxyConfig) ([]effectiveRoute, error) {
 			if variant.Compat != nil {
 				route.compat = mergeBoolMaps(route.compat, variant.Compat)
 			}
-			if variant.ReasoningEfforts != nil {
-				route.reasoningEfforts = cloneStringPointerMap(variant.ReasoningEfforts)
+			if variant.Reasoning != nil {
+				route.reasoning = cloneReasoning(*variant.Reasoning)
 			}
 			if variant.NoImage != nil {
 				route.noImage = *variant.NoImage
@@ -255,7 +267,7 @@ func addConfigRoute(routes *[]effectiveRoute, seen map[string]string, route effe
 	return nil
 }
 
-func validateModelMetadata(displayName string, input []string, contextWindow, maxTokens *int, reasoningEfforts map[string]*string, where string) error {
+func validateModelMetadata(displayName string, input []string, contextWindow, maxTokens *int, where string) error {
 	if displayName != "" && strings.TrimSpace(displayName) == "" {
 		return fmt.Errorf("%s: displayName must not be blank", where)
 	}
@@ -270,7 +282,41 @@ func validateModelMetadata(displayName string, input []string, contextWindow, ma
 	if maxTokens != nil && *maxTokens <= 0 {
 		return fmt.Errorf("%s: maxTokens must be positive", where)
 	}
-	for effort, mapped := range reasoningEfforts {
+	return nil
+}
+
+func validReasoningEffort(effort string) bool {
+	switch effort {
+	case "low", "medium", "high", "xhigh", "max", "ultra":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateReasoning(reasoning *configReasoning, where string, required bool) error {
+	if reasoning == nil {
+		if required {
+			return fmt.Errorf("%s: reasoning is required", where)
+		}
+		return nil
+	}
+	if reasoning.Disabled {
+		if reasoning.DefaultEffort != "" || len(reasoning.EffortsMapping) != 0 {
+			return fmt.Errorf("%s: disabled reasoning must not set defaultEffort or effortsMapping", where)
+		}
+		return nil
+	}
+	if !validReasoningEffort(reasoning.DefaultEffort) {
+		return fmt.Errorf("%s: defaultEffort must be a supported non-off effort", where)
+	}
+	if len(reasoning.EffortsMapping) == 0 {
+		return fmt.Errorf("%s: enabled reasoning requires effortsMapping", where)
+	}
+	if _, exists := reasoning.EffortsMapping[reasoning.DefaultEffort]; !exists {
+		return fmt.Errorf("%s: defaultEffort %q is not in effortsMapping", where, reasoning.DefaultEffort)
+	}
+	for effort, mapped := range reasoning.EffortsMapping {
 		if !validReasoningEffort(effort) {
 			return fmt.Errorf("%s: unsupported reasoning effort %q", where, effort)
 		}
@@ -281,12 +327,11 @@ func validateModelMetadata(displayName string, input []string, contextWindow, ma
 	return nil
 }
 
-func validReasoningEffort(effort string) bool {
-	switch effort {
-	case "off", "low", "medium", "high", "xhigh", "max", "ultra":
-		return true
-	default:
-		return false
+func cloneReasoning(reasoning configReasoning) configReasoning {
+	return configReasoning{
+		Disabled:       reasoning.Disabled,
+		DefaultEffort:  reasoning.DefaultEffort,
+		EffortsMapping: cloneStringPointerMap(reasoning.EffortsMapping),
 	}
 }
 

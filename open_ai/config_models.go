@@ -103,32 +103,123 @@ func generateConfigGrokModels(endpoint string, routes []effectiveRoute) string {
 	return out.String()
 }
 
+type dshProviderGroup struct {
+	name      string
+	display   string
+	protocol  string
+	reasoning string
+	routes    []effectiveRoute
+}
+
 func generateConfigDSHModels(listen string, routes []effectiveRoute) string {
-	messages := routesForProtocol(routes, "anthropic-messages")
-	responses := routesForProtocol(routes, "openai-responses")
+	if len(routes) == 0 {
+		return "# No external routes are configured for Deepseek Harness.\n"
+	}
+	groups := groupDSHRoutes(routes)
 	base := "http://" + strings.Replace(listen, "localhost", "127.0.0.1", 1)
 	var out strings.Builder
-	if len(routes) == 0 {
-		fmt.Fprintln(&out, "# No external routes are configured for Deepseek Harness.")
-		return out.String()
-	}
 	fmt.Fprintln(&out, "llm-pi-ai:")
 	fmt.Fprintln(&out, "  providers:")
-	writeDSHProvider(&out, "llm-proxy-messages", "Anthropic Messages", "anthropic-messages", base, messages)
-	writeDSHProvider(&out, "llm-proxy-responses", "OpenAI Responses", "openai-responses", base+"/v1", responses)
+	for _, group := range groups {
+		baseURL := base
+		if group.protocol == "openai-responses" {
+			baseURL += "/v1"
+		}
+		writeDSHProvider(&out, group, baseURL)
+	}
 	return out.String()
 }
 
-func writeDSHProvider(out *strings.Builder, name, displayName, api, baseURL string, routes []effectiveRoute) {
-	if len(routes) == 0 {
-		return
-	}
-	fmt.Fprintf(out, "    %s:\n", name)
-	fmt.Fprintf(out, "      displayName: %s (llm-proxy)\n", displayName)
-	fmt.Fprintf(out, "      api: %s\n", api)
-	fmt.Fprintf(out, "      baseURL: %s\n", baseURL)
-	fmt.Fprintln(out, "      models:")
+func groupDSHRoutes(routes []effectiveRoute) []dshProviderGroup {
+	groupsByKey := make(map[string]*dshProviderGroup)
+	providerProtocolCounts := make(map[string]int)
 	for _, route := range routes {
+		key := route.provider.Name + "\x00" + route.protocol
+		group := groupsByKey[key]
+		if group == nil {
+			group = &dshProviderGroup{display: dshProviderDisplayName(route.provider), protocol: route.protocol}
+			groupsByKey[key] = group
+			providerProtocolCounts[route.provider.Name]++
+		}
+		group.routes = append(group.routes, route)
+	}
+	groups := make([]dshProviderGroup, 0, len(groupsByKey))
+	for key, group := range groupsByKey {
+		parts := strings.Split(key, "\x00")
+		group.name = "llm-proxy-" + parts[0]
+		if providerProtocolCounts[parts[0]] > 1 {
+			backend := "messages"
+			if parts[1] == "openai-responses" {
+				backend = "responses"
+			}
+			group.name += "-" + backend
+		}
+		group.reasoning = sharedDSHReasoning(group.routes)
+		group.routes = sortRoutes(group.routes)
+		groups = append(groups, *group)
+	}
+	sort.Slice(groups, func(i, j int) bool { return groups[i].name < groups[j].name })
+	return groups
+}
+
+func sharedDSHReasoning(routes []effectiveRoute) string {
+	if len(routes) == 0 {
+		return ""
+	}
+	allDisabled := true
+	sawDisabled := false
+	var shared string
+	for _, route := range routes {
+		if route.reasoning.Disabled {
+			sawDisabled = true
+			if shared != "" {
+				return ""
+			}
+			continue
+		}
+		if sawDisabled {
+			return ""
+		}
+		allDisabled = false
+		if shared == "" {
+			shared = route.reasoning.DefaultEffort
+			continue
+		}
+		if shared != route.reasoning.DefaultEffort {
+			return ""
+		}
+	}
+	if allDisabled {
+		return "off"
+	}
+	return shared
+}
+
+func dshProviderDisplayName(provider configProvider) string {
+	switch provider.Kind {
+	case "commandcode":
+		return "Command Code"
+	case "codex":
+		return "Codex"
+	case "grok":
+		return "Grok"
+	case "http-proxy":
+		return strings.ToUpper(provider.Name)
+	default:
+		return provider.Name
+	}
+}
+
+func writeDSHProvider(out *strings.Builder, group dshProviderGroup, baseURL string) {
+	fmt.Fprintf(out, "    %s:\n", group.name)
+	fmt.Fprintf(out, "      displayName: %s (llm-proxy)\n", group.display)
+	fmt.Fprintf(out, "      api: %s\n", group.protocol)
+	fmt.Fprintf(out, "      baseURL: %s\n", baseURL)
+	if group.reasoning != "" {
+		fmt.Fprintf(out, "      reasoning: %q\n", group.reasoning)
+	}
+	fmt.Fprintln(out, "      models:")
+	for _, route := range group.routes {
 		name := route.displayName
 		if name == "" {
 			name = route.clientModelName
@@ -145,7 +236,9 @@ func writeDSHProvider(out *strings.Builder, name, displayName, api, baseURL stri
 			fmt.Fprintf(out, "          maxTokens: %d\n", *route.maxTokens)
 		}
 		writeDSHCompat(out, route.compat)
-		writeDSHReasoningEfforts(out, route.reasoningEfforts)
+		if !route.reasoning.Disabled {
+			writeDSHReasoningEfforts(out, route.reasoning.EffortsMapping)
+		}
 	}
 }
 

@@ -36,11 +36,22 @@
       },
       "variants": [
         {
-          "agentRunners": ["dsh"],
+          "agentRunners": [
+            "dsh"
+          ],
           "clientModelName": "deepseek-v4.1-flash-from-dsh",
           "adjustUsageForDSH": true
         }
-      ]
+      ],
+      "reasoning": {
+        "disabled": false,
+        "defaultEffort": "xhigh",
+        "effortsMapping": {
+          "high": "high",
+          "xhigh": "xhigh",
+          "max": "max"
+        }
+      }
     },
     {
       "protocol": "openai-responses",
@@ -48,16 +59,40 @@
       "providerModelName": "gpt-5.6-terra",
       "variants": [
         {
-          "agentRunners": ["grok"],
+          "agentRunners": [
+            "grok"
+          ],
           "clientModelName": "gpt-5.6-terra-from-grok",
           "feedToGrokCli": true
         }
-      ]
+      ],
+      "reasoning": {
+        "disabled": false,
+        "defaultEffort": "high",
+        "effortsMapping": {
+          "low": "low",
+          "medium": "medium",
+          "high": "high",
+          "xhigh": "xhigh",
+          "max": "max"
+        }
+      }
     },
     {
       "protocol": "openai-responses",
       "provider": "grok",
-      "providerModelName": "grok-4.6"
+      "providerModelName": "grok-4.6",
+      "reasoning": {
+        "disabled": false,
+        "defaultEffort": "high",
+        "effortsMapping": {
+          "low": "low",
+          "medium": "medium",
+          "high": "high",
+          "xhigh": "xhigh",
+          "max": "max"
+        }
+      }
     }
   ]
 }

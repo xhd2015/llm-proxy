@@ -19,6 +19,7 @@ func TestLoadProxyConfigResolvesAndValidatesVariantRoutes(t *testing.T) {
     "protocol":"anthropic-messages",
     "provider":"commandcode",
     "providerModelName":"deepseek/deepseek-v4.1-flash",
+    "reasoning":{"disabled":true},
     "variants":[{"agentRunners":["dsh"],"clientModelName":"deepseek-v4.1-flash-from-dsh","adjustUsageForDSH":true}]
   }]
 }`
@@ -56,8 +57,8 @@ func TestLoadProxyConfigRejectsDuplicateEffectiveClientModelName(t *testing.T) {
     {"name":"grok","kind":"grok","subscription":true}
   ],
   "models": [
-    {"protocol":"anthropic-messages","provider":"commandcode","providerModelName":"same"},
-    {"protocol":"openai-responses","provider":"grok","providerModelName":"other","variants":[{"clientModelName":"same"}]}
+    {"protocol":"anthropic-messages","provider":"commandcode","providerModelName":"same","reasoning":{"disabled":true}},
+    {"protocol":"openai-responses","provider":"grok","providerModelName":"other","reasoning":{"disabled":true},"variants":[{"clientModelName":"same"}]}
   ]
 }`
 	if err := os.WriteFile(path, []byte(config), 0644); err != nil {
@@ -93,11 +94,47 @@ func TestConfigHandlerRoutesByClientModelNameAndRewritesProviderModel(t *testing
 	}
 }
 
+func TestGroupDSHRoutesDoesNotSuffixNamesByReasoning(t *testing.T) {
+	routes := []effectiveRoute{
+		{provider: configProvider{Name: "codex", Kind: "codex"}, protocol: "openai-responses", clientModelName: "high", reasoning: configReasoning{DefaultEffort: "high"}},
+		{provider: configProvider{Name: "codex", Kind: "codex"}, protocol: "openai-responses", clientModelName: "low", reasoning: configReasoning{DefaultEffort: "low"}},
+	}
+	groups := groupDSHRoutes(routes)
+	if len(groups) != 1 {
+		t.Fatalf("groups = %d, want 1", len(groups))
+	}
+	if groups[0].name != "llm-proxy-codex" {
+		t.Fatalf("group name = %q", groups[0].name)
+	}
+	if groups[0].reasoning != "" {
+		t.Fatalf("group reasoning = %q, want omitted", groups[0].reasoning)
+	}
+}
+
+func TestValidateReasoning(t *testing.T) {
+	valid := &configReasoning{DefaultEffort: "high", EffortsMapping: map[string]*string{"high": ptr("high")}}
+	if err := validateReasoning(valid, "model", true); err != nil {
+		t.Fatalf("valid reasoning: %v", err)
+	}
+	if err := validateReasoning(&configReasoning{Disabled: true}, "model", true); err != nil {
+		t.Fatalf("disabled reasoning: %v", err)
+	}
+	if err := validateReasoning(&configReasoning{Disabled: true, DefaultEffort: "off"}, "model", true); err == nil {
+		t.Fatal("disabled reasoning with defaultEffort was accepted")
+	}
+	if err := validateReasoning(&configReasoning{DefaultEffort: "off", EffortsMapping: map[string]*string{"off": nil}}, "model", true); err == nil {
+		t.Fatal("off reasoning effort was accepted")
+	}
+}
+
+func ptr(value string) *string { return &value }
+
 func TestGenerateConfigDSHModelsRendersMetadata(t *testing.T) {
 	contextWindow := 272000
 	maxTokens := 64000
 	high := "high"
 	routes := []effectiveRoute{{
+		provider:        configProvider{Name: "codex", Kind: "codex"},
 		protocol:        "openai-responses",
 		clientModelName: "gpt-5.6-terra",
 		displayName:     "GPT-5.6 Terra",
@@ -105,9 +142,11 @@ func TestGenerateConfigDSHModelsRendersMetadata(t *testing.T) {
 		contextWindow:   &contextWindow,
 		maxTokens:       &maxTokens,
 		compat:          map[string]bool{"supportsMaxOutputTokens": false},
-		reasoningEfforts: map[string]*string{
-			"high": &high,
-			"off":  nil,
+		reasoning: configReasoning{
+			DefaultEffort: "high",
+			EffortsMapping: map[string]*string{
+				"high": &high,
+			},
 		},
 	}}
 	output := generateConfigDSHModels("127.0.0.1:8890", routes)
@@ -118,7 +157,6 @@ func TestGenerateConfigDSHModelsRendersMetadata(t *testing.T) {
 		"maxTokens: 64000",
 		"supportsMaxOutputTokens: false",
 		"high: high",
-		"off:",
 	} {
 		if !strings.Contains(output, expected) {
 			t.Errorf("output missing %q:\n%s", expected, output)
