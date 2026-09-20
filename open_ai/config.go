@@ -114,6 +114,11 @@ func inspectProxyConfig(path string) (proxyConfig, []effectiveRoute, []configDia
 	if err != nil {
 		return proxyConfig{}, nil, []configDiagnostic{{"error", "$", err.Error()}}
 	}
+	return inspectProxyConfigBytes(data)
+}
+
+// inspectProxyConfigBytes validates drafts without changing their serialized fields.
+func inspectProxyConfigBytes(data []byte) (proxyConfig, []effectiveRoute, []configDiagnostic) {
 	diagnostics := inspectConfigJSON(data)
 	var config proxyConfig
 	if err := json.Unmarshal(data, &config); err != nil {

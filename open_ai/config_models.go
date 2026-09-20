@@ -35,24 +35,28 @@ func handleConfigModels(path, command string, args []string) error {
 		return fmt.Errorf("load --config: %w", err)
 	}
 	runner := strings.TrimSuffix(command, "-models")
-	endpoint := "http://" + config.Listen + "/v1"
+	output, err := generateConfigModels(config.Listen, routes, runner)
+	if err != nil {
+		return err
+	}
+	fmt.Print(output)
+	return nil
+}
+
+func generateConfigModels(listen string, routes []effectiveRoute, runner string) (string, error) {
+	endpoint := "http://" + listen + "/v1"
 	routes = routesForAgentRunner(routes, runner)
 	routes = withoutRunnerProvider(routes, runner)
 	switch runner {
 	case "codex":
-		fmt.Print(generateConfigCodexModels(endpoint, routes))
+		return generateConfigCodexModels(endpoint, routes), nil
 	case "grok":
-		fmt.Print(generateConfigGrokModels(endpoint, routes))
+		return generateConfigGrokModels(endpoint, routes), nil
 	case "dsh":
-		output, err := generateConfigDSHModels(config.Listen, routes)
-		if err != nil {
-			return err
-		}
-		fmt.Print(output)
+		return generateConfigDSHModels(listen, routes)
 	default:
-		return fmt.Errorf("unsupported agent runner %q", runner)
+		return "", fmt.Errorf("unsupported agent runner %q", runner)
 	}
-	return nil
 }
 
 func withoutRunnerProvider(routes []effectiveRoute, runner string) []effectiveRoute {

@@ -1,5 +1,7 @@
 # Unified server configuration
 
+## Run and validate
+
 Run all configured routes on one listener:
 
 ```sh
@@ -113,3 +115,25 @@ For a requested runner, matching variants replace their base model in generated
 output. If no variant matches, the base model is printed.
 
 `dsh-models` emits the `llm-proxy-providers` settings section, grouping routes by provider and protocol. Each provider includes an `apiKeyEnv` reference derived from its uppercase name with punctuation replaced by underscores and `_API_KEY` appended (for example, `CODEX_API_KEY`). Names beginning with a digit receive a `LLM_PROXY_` prefix. Store a nonempty placeholder under that reference in DSH credentials or its launch environment; upstream subscription credentials remain owned by the proxy. Generated model `input` lists contain resolved capabilities. Export fails without partial output if a model has no enabled inputs.
+
+## Browser editor
+
+```sh
+llm-proxy web --config ~/.config/llm-proxy/config.json
+llm-proxy --config ~/.config/llm-proxy/config.json web
+llm-proxy web --help
+```
+
+The command opens an embedded editor in your default browser and serves it on an automatically assigned `127.0.0.1` port until Ctrl+C. If browser launch fails, open the printed URL manually. The printed URL is directly usable without a token. The editor requires no frontend installation or internet connection.
+
+Models shows a three-level provider → base model → variant tree grouped by configured provider name in config order. Providers start expanded; base-model branches start collapsed. Select a provider to edit its settings, a base model to edit its fields, or a variant to edit only its overrides. Add model is scoped to its provider. Search includes matching descendants and their ancestors, temporarily expanding results without changing saved expansion state. Missing and unknown provider references remain visible for repair. The Providers tab also offers direct provider editing. Raw JSON exposes all fields, including listener and logging settings, and can repair malformed config. Forms preserve omitted and null fields until edited; variants retain their inheritance. Form changes format the JSON with two-space indentation. Raw edits retain the submitted text. Drafts stay in browser memory, not browser storage.
+
+Validation and the DSH, Codex, and Grok previews use the current draft without writing files or contacting providers. Each preview matches its corresponding `*-models` command, including runner variants, protocol filtering, and native-provider exclusions. Export failures affect only that runner’s preview. Save is explicit and repeats config validation on the server; config errors prevent saving, but export warnings do not. Copy and Download export the selected preview as `llm-proxy-dsh.yaml`, `llm-proxy-codex.toml`, or `llm-proxy-grok.toml`. TOML exports are snippets to merge, not complete replacement files. Runner settings are never modified.
+
+Each changed save creates a private sibling `config.json.backup-*` file containing the previous bytes, then replaces the selected file atomically while preserving its permission bits. Backups remain until you remove them. External edits detected before replacement reject the save; Reload discards your draft after confirmation and reads the current file. Do not edit the same file concurrently with a noncooperating writer during the final replacement. The editor resolves a symlink at launch and edits its target, without replacing the symlink. Configs must be regular files no larger than 4 MiB.
+
+The local API is unauthenticated: local processes can read and edit the selected config while it runs. It binds only to loopback, checks Host and Origin, rejects cross-origin browser API requests using Fetch Metadata when available, and accepts only JSON writes. It exposes only the selected config, never arbitrary file paths or provider auth file contents. Config values can include sensitive data: the Raw JSON view displays them, and backups contain them. Saving does not reload a running proxy or update DSH settings; apply those changes separately.
+
+### Editor verification
+
+Run `go test -race ./open_ai -run 'TestConfigWeb|TestDSHModels'` for draft validation, origin protection, backups, permission preservation, and conflicting saves. Run `node --test open_ai/testdata/config_web_tree.test.mjs` for grouping and search. For browser regression checks, copy `docs/config.example.json` into a temporary `/tmp/llm-proxy-web-*` directory, open the editor on that copy, and run `browser-agent session run --session-id SESSION --tab-id TAB open_ai/testdata/config_web.browser.js` in its content tab. The script refuses non-temporary configs and checks the provider tree, variant-only edits, search expansion, scoped creation, form round-trips, invalid drafts, modalities, inheritance, preview, save, and reload. Check desktop and narrow mobile layouts separately.

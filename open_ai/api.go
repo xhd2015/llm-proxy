@@ -73,6 +73,7 @@ Options:
   grok-models                     print Grok model configuration; with --config, use configured routes
   lint                            validate a configuration file
   dsh-models                      print Deepseek Harness configuration from --config routes
+  web                             open a local editor for --config with DSH, Codex, and Grok previews
 
 Examples:
    llm-proxy --base-url http://localhost:8081 --model model-alias=actual-model
@@ -159,6 +160,8 @@ func Handle(args []string) error {
 		command := args[0]
 		commandArgs := args[1:]
 		switch command {
+		case "web":
+			return handleConfigWeb(configFile, commandArgs)
 		case "lint":
 			return handleConfigLint(configFile, commandArgs, os.Stdout, os.Stderr)
 		case "doc":

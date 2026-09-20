@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>llm-proxy · Config editor</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header>
+    <div><p class="eyebrow">LLM-PROXY / LOCAL WORKSPACE</p><h1>Config editor</h1><p id="path">Connecting…</p></div>
+    <div class="actions"><span id="status" role="status">Loading</span><button id="reload">Reload</button><button id="validate">Validate</button><button id="save" class="primary" disabled>Save config</button></div>
+  </header>
+  <p class="notice">Edits stay in this browser until saved. Saving does not restart the proxy or update DSH settings.</p>
+  <nav aria-label="Editor sections">
+    <button data-tab="models" aria-pressed="true">Models</button><button data-tab="providers" aria-pressed="false">Providers</button><button data-tab="raw" aria-pressed="false">Raw JSON</button><button data-tab="preview" aria-pressed="false">Previews</button>
+  </nav>
+  <main>
+    <section id="structured" class="workspace"><aside><div class="list-tools"><input id="search" aria-label="Search entries" placeholder="Search entries…"><button id="add">+ Add</button></div><div id="entries"></div></aside><article id="form"></article></section>
+    <section id="raw-panel" hidden><h2>Source JSON</h2><p>Repair invalid JSON or edit advanced fields here. No fields are normalized on save.</p><textarea id="raw" spellcheck="false" aria-label="Config JSON"></textarea></section>
+    <section id="preview-panel" hidden><div class="actions"><h2 id="preview-title">DSH export</h2><button id="copy">Copy</button><button id="download">Download</button></div><nav aria-label="Preview runner"><button data-runner="dsh" aria-pressed="true">DSH</button><button data-runner="codex" aria-pressed="false">Codex</button><button data-runner="grok" aria-pressed="false">Grok</button></nav><p>Preview of the current draft, including unsaved changes. Copy or download only; runner settings are never modified.</p><p id="preview-target"></p><pre id="preview-content"></pre></section>
+    <section class="diagnostics"><h2>Diagnostics <span id="diagnostic-count"></span></h2><ul id="diagnostics" aria-live="polite"></ul><p id="message" role="status"></p></section>
+  </main>
+</body>
+</html>
