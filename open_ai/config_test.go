@@ -167,6 +167,102 @@ func TestGenerateConfigDSHModelsRendersMetadata(t *testing.T) {
 	}
 }
 
+func TestGenerateConfigCodexCatalog(t *testing.T) {
+	contextWindow := 500000
+	high := "high"
+	max := "max"
+	routes := []effectiveRoute{
+		{
+			modelIndex:      0,
+			provider:        configProvider{Name: "grok", Kind: "grok"},
+			protocol:        "openai-responses",
+			clientModelName: "grok-4.6",
+			displayName:     "Grok 4.6",
+			input:           []string{"text", "image"},
+			contextWindow:   &contextWindow,
+			reasoning: configReasoning{
+				DefaultEffort: "high",
+				EffortsMapping: map[string]*string{
+					"low": &high, "medium": &high, "high": &high, "xhigh": &max, "max": &max, "ultra": &max,
+				},
+			},
+		},
+		{
+			modelIndex:      1,
+			provider:        configProvider{Name: "grok", Kind: "grok"},
+			protocol:        "openai-responses",
+			clientModelName: "grok-4.5",
+			reasoning:       configReasoning{Disabled: true},
+		},
+		{
+			modelIndex:      2,
+			provider:        configProvider{Name: "codex", Kind: "codex"},
+			protocol:        "openai-responses",
+			clientModelName: "gpt-5.6-terra",
+		},
+	}
+	output, err := generateConfigCodexCatalog("127.0.0.1:8890", routes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var catalog struct {
+		Models []struct {
+			Slug                     string   `json:"slug"`
+			DisplayName              string   `json:"display_name"`
+			Description              string   `json:"description"`
+			DefaultReasoningLevel    string   `json:"default_reasoning_level"`
+			ContextWindow            uint64   `json:"context_window"`
+			MaxContextWindow         uint64   `json:"max_context_window"`
+			InputModalities          []string `json:"input_modalities"`
+			SupportedReasoningLevels []struct {
+				Effort string `json:"effort"`
+			} `json:"supported_reasoning_levels"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal([]byte(output), &catalog); err != nil {
+		t.Fatalf("catalog is not valid JSON: %v\n%s", err, output)
+	}
+	if len(catalog.Models) != 2 {
+		t.Fatalf("catalog models = %+v, want the two non-codex routes", catalog.Models)
+	}
+	first := catalog.Models[1]
+	second := catalog.Models[0]
+	if first.Slug != "grok-4.6" || first.DisplayName != "Grok 4.6" || first.Description != "llm-proxy route (grok)" {
+		t.Fatalf("grok-4.6 entry = %+v", first)
+	}
+	if second.Slug != "grok-4.5" || second.DisplayName != "grok-4.5" {
+		t.Fatalf("grok-4.5 entry = %+v", second)
+	}
+	if first.ContextWindow != 500000 || first.MaxContextWindow != 500000 {
+		t.Fatalf("grok-4.6 context window = %d/%d", first.ContextWindow, first.MaxContextWindow)
+	}
+	efforts := make([]string, 0, len(first.SupportedReasoningLevels))
+	for _, level := range first.SupportedReasoningLevels {
+		efforts = append(efforts, level.Effort)
+	}
+	if strings.Join(efforts, ",") != "low,medium,high,xhigh" {
+		t.Fatalf("grok-4.6 efforts = %v, want codex-supported mapping keys in picker order", efforts)
+	}
+	if first.DefaultReasoningLevel != "high" {
+		t.Fatalf("grok-4.6 default effort = %q", first.DefaultReasoningLevel)
+	}
+	if second.DefaultReasoningLevel != "" || len(second.SupportedReasoningLevels) != 0 {
+		t.Fatalf("disabled reasoning must omit effort fields: %+v", second)
+	}
+	for _, slug := range []string{"gpt-5.6-terra"} {
+		if strings.Contains(output, slug) {
+			t.Errorf("catalog unexpectedly contains codex-provider model %q", slug)
+		}
+	}
+	empty, err := generateConfigCodexCatalog("127.0.0.1:8890", []effectiveRoute{
+		{provider: configProvider{Name: "codex", Kind: "codex"}, protocol: "openai-responses", clientModelName: "gpt-5.6-terra"},
+		{provider: configProvider{Name: "commandcode", Kind: "commandcode"}, protocol: "anthropic-messages", clientModelName: "deepseek-v4.1"},
+	})
+	if err != nil || empty != "" {
+		t.Fatalf("catalog without codex routes = %q, %v; want empty", empty, err)
+	}
+}
+
 func TestWithoutRunnerProviderRemovesSelfProxyRoutes(t *testing.T) {
 	routes := []effectiveRoute{
 		{clientModelName: "codex", provider: configProvider{Kind: "codex"}},

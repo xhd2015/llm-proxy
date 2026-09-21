@@ -15,6 +15,7 @@ input[type=checkbox] { width: auto; } textarea { min-height: 95px; font: 13px/1.
 #status { font-size: 12px; margin-right: 8px; } .notice { margin: 24px 0 20px; border-left: 3px solid #9cbaad; padding-left: 12px; font-size: 13px; }
 nav { display: flex; gap: 6px; border-bottom: 1px solid var(--border); margin-bottom: 20px; padding-bottom: 12px; flex-wrap: wrap; }
 nav button { border: 0; background: transparent; } nav button[aria-pressed=true] { background: #dcebe3; color: #144b3c; font-weight: 650; }
+#preview-files { border-bottom: 0; padding-bottom: 0; margin-bottom: -8px; font-size: 13px; }
 .workspace { display: grid; grid-template-columns: 330px minmax(0,1fr); border: 1px solid var(--border); background: #fff; border-radius: 12px; overflow: hidden; min-height: 460px; }
 aside { background: #f0f4ef; border-right: 1px solid var(--border); padding: 16px; }.list-tools { display: flex; gap: 6px; margin-bottom: 16px; }.list-tools button { white-space: nowrap; }
 #entries { display: flex; flex-direction: column; gap: 6px; max-height: 600px; overflow: auto; }
@@ -35,3 +36,4 @@ fieldset { border: 1px solid var(--border); border-radius: 8px; padding: 16px; m
 #diagnostics { margin: 0; padding-left: 20px; overflow-wrap: anywhere; }.error { color: #a62f2f; }.warning { color: #85621e; }#message { white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 0; }
 #raw { min-height: 500px; } pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 20px; background: #eaf0e9; border-radius: 10px; font: 13px/1.7 ui-monospace, monospace; }[hidden] { display: none !important; }
 @media (max-width: 760px) { body { padding: 16px; } header { align-items: flex-start; flex-direction: column; gap: 16px; }.workspace { grid-template-columns: 1fr; }aside { border-right: 0; border-bottom: 1px solid var(--border); }#entries { max-height: 180px; }article { padding: 16px; }.fields { grid-template-columns: 1fr; } }
+#merge-native-wrap { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: #35544a; cursor: pointer; }

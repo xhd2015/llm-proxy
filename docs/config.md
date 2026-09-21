@@ -88,9 +88,25 @@ configuration.
 subscription transformations and may declare `dummyToken`; when present, it is
 sent upstream as a replacement `Authorization: Bearer` placeholder.
 
+A model or variant may declare `protocolAdapter` to expose a second,
+translated client surface in addition to the one `protocol` specifies. The
+upstream exchange is always defined by `protocol`; by default clients use the
+same protocol. The adapter names the bridge in `{upstream}2{client}` form and
+must be compatible with the model's protocol: today the only supported value
+is `anthropic2openai`, which requires `protocol: "anthropic-messages"` and
+lets OpenAI Responses clients (Codex) call the model through `/v1/responses`
+while DSH and Grok clients keep using `/v1/messages` unchanged. The proxy
+translates the Responses request into a `/v1/messages` request and the
+Anthropic JSON/SSE response back into Responses JSON/SSE, transporting
+reasoning effort as `output_config.effort` so the route's `effortMapping`
+still selects the upstream effort. `protocol=openai-responses` with
+`protocolAdapter: "anthropic2openai"` fails validation. Variants inherit the
+adapter when omitted and may override it.
+
 Variants inherit the base model's protocol, provider, provider model name, and
 behavior. A model or variant may also define `displayName`, `inputs`,
-`contextWindow`, `maxTokens`, `compat`, and `reasoning`. `reasoning` is a
+`contextWindow`, `maxTokens`, `compat`, `protocolAdapter`, `baseInstructions`,
+and `reasoning`. `reasoning` is a
 required base-model object with `disabled`, and, when enabled,
 `defaultEffort` plus `effortsMapping`. Variants replace the complete reasoning
 object when they define one and inherit it when omitted. Variants merge
@@ -116,6 +132,10 @@ output. If no variant matches, the base model is printed.
 
 `dsh-models` emits the `llm-proxy-providers` settings section, grouping routes by provider and protocol. Each provider includes an `apiKeyEnv` reference derived from its uppercase name with punctuation replaced by underscores and `_API_KEY` appended (for example, `CODEX_API_KEY`). Names beginning with a digit receive a `LLM_PROXY_` prefix. Store a nonempty placeholder under that reference in DSH credentials or its launch environment; upstream subscription credentials remain owned by the proxy. Generated model `input` lists contain resolved capabilities. Export fails without partial output if a model has no enabled inputs.
 
+`codex-models` emits a `~/.codex/config.toml` snippet with the provider block and the default `model`, followed after a `# ----- Model catalog -----` delimiter by a Codex model catalog JSON. Saving that JSON as `~/.codex/llm-proxy-codex.json` makes every exported model switchable in Codex's `/model` picker with display names, context windows, and reasoning levels. The catalog has one entry per exported route: `slug` is the client model name, reasoning levels are the route's `effortsMapping` keys that Codex accepts (`minimal`, `low`, `medium`, `high`, `xhigh`), the default level is `defaultEffort` when Codex supports it, and `context_window` and `input_modalities` mirror the route metadata. Routes exported for Codex are the `openai-responses` routes plus anthropic-messages models that set `protocolAdapter: "anthropic2openai"`; models whose provider kind is `codex` remain excluded, and the preview notes unadapted anthropic-messages models with the setting that would include them.
+
+By default the catalog also includes the native models captured from the Codex binary's bundled catalog (`codex debug models --bundled`), so enabling `model_catalog_json` keeps the built-in GPT models pickable alongside the proxy models: proxy entries come first, slug collisions resolve in favor of the proxy route, and picker priorities are reassigned sequentially. The plain `codex debug models` refresh is deliberately not consulted: once `model_catalog_json` is installed it renders that catalog instead of the native one, which would make the capture self-referential. Because the merged catalog is a superset of Codex's own picker, the generated TOML emits `model_catalog_json` uncommented; the comment records the Codex version the native models were captured from — regenerate the export after upgrading Codex. Proxy models also get a real agent prompt: codex requires `base_instructions` on every catalog entry, and the export derives it from the shortest bundled prompt with the GPT identity header replaced by a model-neutral one ("You are Codex, a coding agent. You and the user share one workspace, ..."), so third-party models receive codex's operating guidance (editing constraints, autonomy, skills, communication rules) without GPT identity. A model or variant may set `baseInstructions` to override the prompt outright; without a bundled capture the entry falls back to the minimal "You are Codex, a coding agent.". If the capture adds no models (codex missing, or every native entry collides with a proxy route), the export degrades to proxy-only with a truthful comment, a `warning:` on stderr (exit code stays 0), and a diagnostics warning in the editor. `--no-merge-native` emits a proxy-only catalog directly and comments the `model_catalog_json` line again (a proxy-only catalog replaces the whole picker, dropping the built-in models). The web editor's Codex preview has the same behavior behind a `Merge Native` checkbox (default on, remembered per browser); it captures the bundled catalog once per editor process, and the catalog preview file carries a note reporting how many native models were merged. Selecting the `llm-proxy-codex.json` preview file shows an install button that writes the generated catalog to `$CODEX_HOME/llm-proxy-codex.json` (or `~/.codex/llm-proxy-codex.json`): `Create` when the file does not exist, `Update` when it differs from the generated content, and a disabled `Updated` once it matches. The button writes exactly what the preview shows — the current draft and merge state — atomically, and is a no-op when the file is already identical. The proxy serves upstream credentials itself, so the generated snippet carries no auth keys and never sets `requires_openai_auth`.
+
 ## Browser editor
 
 ```sh
@@ -128,7 +148,7 @@ The command opens an embedded editor in your default browser and serves it on an
 
 Models shows a three-level provider → base model → variant tree grouped by configured provider name in config order. Providers start expanded; base-model branches start collapsed. Select a provider to edit its settings, a base model to edit its fields, or a variant to edit only its overrides. Add model is scoped to its provider. Search includes matching descendants and their ancestors, temporarily expanding results without changing saved expansion state. Missing and unknown provider references remain visible for repair. The Providers tab also offers direct provider editing. Raw JSON exposes all fields, including listener and logging settings, and can repair malformed config. Forms preserve omitted and null fields until edited; variants retain their inheritance. Form changes format the JSON with two-space indentation. Raw edits retain the submitted text. Drafts stay in browser memory, not browser storage.
 
-Validation and the DSH, Codex, and Grok previews use the current draft without writing files or contacting providers. Each preview matches its corresponding `*-models` command, including runner variants, protocol filtering, and native-provider exclusions. Export failures affect only that runner’s preview. Save is explicit and repeats config validation on the server; config errors prevent saving, but export warnings do not. Copy and Download export the selected preview as `llm-proxy-dsh.yaml`, `llm-proxy-codex.toml`, or `llm-proxy-grok.toml`. TOML exports are snippets to merge, not complete replacement files. Runner settings are never modified.
+Validation and the DSH, Codex, and Grok previews use the current draft without writing files or contacting providers. Each preview matches its corresponding `*-models` command, including runner variants, protocol filtering, and native-provider exclusions. Export failures affect only that runner’s preview. Save is explicit and repeats config validation on the server; config errors prevent saving, but export warnings do not. Each preview exposes its generated files as tabs: DSH offers `llm-proxy-dsh.yaml`, Grok offers `llm-proxy-grok.toml`, and Codex offers the `llm-proxy-codex.toml` snippet plus the optional `llm-proxy-codex.json` model catalog. Copy and Download export the selected file; TOML exports are snippets to merge, not complete replacement files. Runner settings are never modified.
 
 Each changed save creates a private sibling `config.json.backup-*` file containing the previous bytes, then replaces the selected file atomically while preserving its permission bits. Backups remain until you remove them. External edits detected before replacement reject the save; Reload discards your draft after confirmation and reads the current file. Do not edit the same file concurrently with a noncooperating writer during the final replacement. The editor resolves a symlink at launch and edits its target, without replacing the symlink. Configs must be regular files no larger than 4 MiB.
 

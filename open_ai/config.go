@@ -16,6 +16,7 @@ import (
 	grokapi "github.com/xhd2015/dot-pkgs/go-pkgs/shell/grok/api"
 	"github.com/xhd2015/llm-proxy/commandcode"
 	logutil "github.com/xhd2015/llm-proxy/log"
+	"github.com/xhd2015/llm-proxy/pkgs/anthropic2openai"
 )
 
 type proxyConfig struct {
@@ -53,6 +54,8 @@ type configModel struct {
 	ProviderModelName string            `json:"providerModelName"`
 	ClientModelName   string            `json:"clientModelName"`
 	DisplayName       string            `json:"displayName"`
+	ProtocolAdapter   string            `json:"protocolAdapter"`
+	BaseInstructions  string            `json:"baseInstructions"`
 	Inputs            []configInput     `json:"inputs"`
 	ContextWindow     *int              `json:"contextWindow"`
 	MaxTokens         *int              `json:"maxTokens"`
@@ -69,6 +72,8 @@ type configVariant struct {
 	ClientModelName   string            `json:"clientModelName"`
 	AgentRunners      []string          `json:"agentRunners"`
 	DisplayName       string            `json:"displayName"`
+	ProtocolAdapter   string            `json:"protocolAdapter"`
+	BaseInstructions  string            `json:"baseInstructions"`
 	Inputs            []configInput     `json:"inputs"`
 	ContextWindow     *int              `json:"contextWindow"`
 	MaxTokens         *int              `json:"maxTokens"`
@@ -82,6 +87,8 @@ type configVariant struct {
 
 type effectiveRoute struct {
 	protocol          string
+	protocolAdapter   string
+	baseInstructions  string
 	clientModelName   string
 	providerModelName string
 	provider          configProvider
@@ -215,6 +222,9 @@ func validateProxyConfig(config proxyConfig) ([]effectiveRoute, error) {
 		if model.ProviderModelName == "" {
 			failures = append(failures, fmt.Errorf("%s: providerModelName is required", where))
 		}
+		if err := validateProtocolAdapter(model.ProtocolAdapter, model.Protocol, where); err != nil {
+			failures = append(failures, err)
+		}
 		if err := validateModelMetadata(model.DisplayName, model.Inputs, model.ContextWindow, model.MaxTokens, where); err != nil {
 			failures = append(failures, err)
 		}
@@ -229,7 +239,7 @@ func validateProxyConfig(config proxyConfig) ([]effectiveRoute, error) {
 		if model.Reasoning != nil {
 			reasoning = cloneReasoning(*model.Reasoning)
 		}
-		base := effectiveRoute{protocol: model.Protocol, clientModelName: baseName, providerModelName: model.ProviderModelName, provider: provider, displayName: model.DisplayName, input: resolveInputs(model.Inputs), contextWindow: model.ContextWindow, maxTokens: model.MaxTokens, compat: cloneBoolMap(model.Compat), reasoning: reasoning, noImage: boolValue(model.NoImage), adjustUsageForDSH: boolValue(model.AdjustUsageForDSH), feedToGrokCli: boolValue(model.FeedToGrokCli), effortMapping: model.EffortMapping, modelIndex: i}
+		base := effectiveRoute{protocol: model.Protocol, protocolAdapter: model.ProtocolAdapter, baseInstructions: model.BaseInstructions, clientModelName: baseName, providerModelName: model.ProviderModelName, provider: provider, displayName: model.DisplayName, input: resolveInputs(model.Inputs), contextWindow: model.ContextWindow, maxTokens: model.MaxTokens, compat: cloneBoolMap(model.Compat), reasoning: reasoning, noImage: boolValue(model.NoImage), adjustUsageForDSH: boolValue(model.AdjustUsageForDSH), feedToGrokCli: boolValue(model.FeedToGrokCli), effortMapping: model.EffortMapping, modelIndex: i}
 		if err := addConfigRoute(&routes, seenNames, base, where); err != nil {
 			failures = append(failures, err)
 		}
@@ -244,11 +254,20 @@ func validateProxyConfig(config proxyConfig) ([]effectiveRoute, error) {
 			if err := validateReasoning(variant.Reasoning, variantWhere, false); err != nil {
 				failures = append(failures, err)
 			}
+			if err := validateProtocolAdapter(variant.ProtocolAdapter, model.Protocol, variantWhere); err != nil {
+				failures = append(failures, err)
+			}
 			route := base
 			route.isVariant = true
 			route.agentRunners = append([]string(nil), variant.AgentRunners...)
 			if variant.ClientModelName != "" {
 				route.clientModelName = variant.ClientModelName
+			}
+			if variant.ProtocolAdapter != "" {
+				route.protocolAdapter = variant.ProtocolAdapter
+			}
+			if variant.BaseInstructions != "" {
+				route.baseInstructions = variant.BaseInstructions
 			}
 			if variant.DisplayName != "" {
 				route.displayName = variant.DisplayName
@@ -539,6 +558,31 @@ func newConfigHandler(config proxyConfig, routes []effectiveRoute, logger *logut
 }
 
 func buildProviderHandler(route effectiveRoute, endpoint string, logger *logutil.Logger) (http.Handler, error) {
+	handler, err := buildProviderProtocolHandler(route, endpoint, logger)
+	if err != nil {
+		return nil, err
+	}
+	if route.protocolAdapter != "" {
+		// The model's protocol stays the upstream exchange; the adapter adds a
+		// client surface for its target protocol (see protocolAdapters).
+		handler = anthropic2openai.BridgeHandler(handler, anthropic2openai.BridgeOptions{
+			DefaultMaxTokens: bridgeDefaultMaxTokens(route),
+			EffortMode:       anthropic2openai.EffortOutputConfig,
+		})
+	}
+	return handler, nil
+}
+
+// bridgeDefaultMaxTokens is the fallback max_tokens for bridged requests:
+// the route's configured maxTokens, or the bridge's conservative default.
+func bridgeDefaultMaxTokens(route effectiveRoute) int {
+	if route.maxTokens != nil && *route.maxTokens > 0 {
+		return *route.maxTokens
+	}
+	return 8192
+}
+
+func buildProviderProtocolHandler(route effectiveRoute, endpoint string, logger *logutil.Logger) (http.Handler, error) {
 	provider := route.provider
 	switch provider.Kind {
 	case "commandcode":
@@ -604,7 +648,9 @@ func (h *configHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	model, _ := request["model"].(string)
 	entry, exists := h.routes[model]
-	if !exists || entry.route.protocol != protocol {
+	bridged := exists && entry.route.protocolAdapter != "" &&
+		protocol == "openai-responses" && entry.route.protocol == "anthropic-messages"
+	if !exists || (entry.route.protocol != protocol && !bridged) {
 		http.Error(w, "unknown model", http.StatusNotFound)
 		return
 	}
@@ -618,6 +664,36 @@ func (h *configHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.ContentLength = int64(len(body))
 	r.Header.Set("Content-Length", fmt.Sprint(len(body)))
 	entry.handler.ServeHTTP(w, r)
+}
+
+// protocolAdapter names a bridge that lets clients speaking a different
+// protocol consume the model: the model's `protocol` stays the upstream
+// exchange protocol, and the adapter adds a client surface for its target
+// protocol. Ported adapters live in pkgs/.
+type protocolAdapterSpec struct {
+	upstreamProtocol string
+	clientProtocol   string
+}
+
+var protocolAdapters = map[string]protocolAdapterSpec{
+	"anthropic2openai": {upstreamProtocol: "anthropic-messages", clientProtocol: "openai-responses"},
+}
+
+// validateProtocolAdapter checks an adapter value against the model's
+// upstream protocol: the adapter's upstream side must match, so
+// protocol=openai-responses with protocolAdapter=anthropic2openai is an error.
+func validateProtocolAdapter(adapter, protocol, where string) error {
+	if adapter == "" {
+		return nil
+	}
+	spec, ok := protocolAdapters[adapter]
+	if !ok {
+		return fmt.Errorf("%s: unsupported protocolAdapter %q", where, adapter)
+	}
+	if spec.upstreamProtocol != protocol {
+		return fmt.Errorf("%s: protocolAdapter %q is incompatible with protocol %q (requires %q)", where, adapter, protocol, spec.upstreamProtocol)
+	}
+	return nil
 }
 
 func protocolForPath(path string) string {

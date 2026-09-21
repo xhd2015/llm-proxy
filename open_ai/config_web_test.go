@@ -25,6 +25,12 @@ func webTestStore(t *testing.T, text string) *configWebStore {
 	return store
 }
 
+// webTestHandler builds the editor handler with an unreachable codex binary,
+// so previews stay deterministic and never spawn a real Codex CLI.
+func webTestHandler(store *configWebStore) http.Handler {
+	return newConfigWebHandlerWithNative(store, "127.0.0.1:12345", &nativeCatalogLoader{bin: "/nonexistent-llm-proxy-test-codex"})
+}
+
 func webTestRequest(handler http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(method, "http://127.0.0.1:12345"+path, strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
@@ -42,7 +48,7 @@ func webTestBody(text, revision string) string {
 func TestConfigWebSaveAndPreview(t *testing.T) {
 	t.Parallel()
 	store := webTestStore(t, lintValid)
-	handler := newConfigWebHandler(store, "127.0.0.1:12345")
+	handler := webTestHandler(store)
 	loaded := webTestRequest(handler, "GET", "/api/config", "")
 	if loaded.Code != 200 {
 		t.Fatal(loaded.Body.String())
@@ -107,11 +113,11 @@ func TestConfigWebInvalidAndWarningDrafts(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := webTestStore(t, tc.text)
-			handler := newConfigWebHandler(store, "127.0.0.1:12345")
+			handler := webTestHandler(store)
 			if got := webTestRequest(handler, "GET", "/api/config", ""); got.Code != 200 {
 				t.Fatal("cannot open invalid config", got.Body.String())
 			}
-			report := inspectConfigWebDraft(tc.text)
+			report := inspectConfigWebDraft(tc.text, configModelsOptions{})
 			if report.Valid != tc.valid || len(report.Diagnostics) == 0 {
 				t.Fatalf("%+v", report)
 			}
@@ -138,7 +144,7 @@ func TestConfigWebInvalidAndWarningDrafts(t *testing.T) {
 func TestConfigWebRequestProtection(t *testing.T) {
 	t.Parallel()
 	store := webTestStore(t, lintValid)
-	handler := newConfigWebHandler(store, "127.0.0.1:12345")
+	handler := webTestHandler(store)
 	for _, tc := range []struct {
 		name, method, path, host, origin, body, contentType string
 		status                                              int

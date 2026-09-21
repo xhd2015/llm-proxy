@@ -2,7 +2,11 @@ import {modelGroups, filterModelGroups, modelTitle} from './tree.mjs';
 
 const $ = (id) => document.getElementById(id);
 let text = '', saved = '', revision = '', tab = 'models', selected = 0, report = null;
-let previewRunner = 'dsh';
+let previewRunner = 'dsh', previewFile = 0;
+const mergeNativeStorageKey = 'llm-proxy.merge-native';
+function mergeNativeEnabled() {
+  try { return localStorage.getItem(mergeNativeStorageKey) !== '0'; } catch { return true; }
+}
 let selectedVariant = -1, selectedProvider = -1;
 const collapsedProviders = new Set(), expandedModels = new Set();
 let generation = 0, timer, busy = false;
@@ -41,15 +45,48 @@ async function api(path, body) {
   }
   return response.json();
 }
+function previewFiles() {
+  const preview = report?.previews?.[previewRunner];
+  if (Array.isArray(preview?.files) && preview.files.length) return preview.files;
+  return preview?.content ? [{name: `llm-proxy-${previewRunner}.${preview.format}`, format: preview.format, content: preview.content}] : [];
+}
+function selectedPreviewFile() {
+  const files = previewFiles();
+  return files[Math.min(previewFile, files.length - 1)];
+}
 function renderPreview() {
   const preview = report?.previews?.[previewRunner];
   const name = previewRunner === 'dsh' ? 'DSH' : previewRunner === 'codex' ? 'Codex' : 'Grok';
   $('preview-title').textContent = name + (previewRunner === 'dsh' ? ' YAML export' : ' TOML snippet');
-  $('preview-target').textContent = previewRunner === 'dsh' ? 'Merge into DSH settings.' : `Merge into ~/.${previewRunner}/config.toml; this is not a complete replacement file.`;
+  $('merge-native-wrap').hidden = previewRunner !== 'codex';
+  $('preview-target').textContent = previewRunner === 'dsh' ? 'Merge into DSH settings.' : previewRunner === 'codex' ? 'Merge into ~/.codex/config.toml; this is not a complete replacement file. The .json file is the Codex model catalog for the /model picker; select it and use Update to install it.' : `Merge into ~/.${previewRunner}/config.toml; this is not a complete replacement file.`;
   document.querySelectorAll('[data-runner]').forEach(el => el.setAttribute('aria-pressed', String(el.dataset.runner === previewRunner)));
-  $('preview-content').textContent = preview?.error || preview?.content || (report ? 'Preview unavailable. Check diagnostics below.' : 'Validate the current draft to preview it.');
+  const files = previewFiles();
+  const nav = $('preview-files');
+  nav.hidden = files.length < 2;
+  nav.replaceChildren(...files.map((file, index) => {
+    const el = button(file.name, () => { previewFile = index; state(); });
+    el.setAttribute('aria-pressed', String(index === Math.min(previewFile, files.length - 1)));
+    return el;
+  }));
+  $('preview-content').textContent = preview?.error || selectedPreviewFile()?.content || (report ? 'Preview unavailable. Check diagnostics below.' : 'Validate the current draft to preview it.');
+  updateCatalogInstall();
 }
-document.querySelectorAll('[data-runner]').forEach(el => el.onclick = () => { previewRunner = el.dataset.runner; state(); });
+function updateCatalogInstall() {
+  const install = $('catalog-install');
+  const file = selectedPreviewFile();
+  const show = previewRunner === 'codex' && file?.name === 'llm-proxy-codex.json' && !!file?.targetState;
+  install.hidden = !show;
+  if (!show) return;
+  install.textContent = file.targetState === 'missing' ? 'Create' : file.targetState === 'same' ? 'Updated' : 'Update';
+  install.disabled = file.targetState === 'same';
+}
+document.querySelectorAll('[data-runner]').forEach(el => el.onclick = () => { previewRunner = el.dataset.runner; previewFile = 0; state(); });
+$('merge-native').checked = mergeNativeEnabled();
+$('merge-native').onchange = () => {
+  try { localStorage.setItem(mergeNativeStorageKey, $('merge-native').checked ? '1' : '0'); } catch {}
+  validate();
+};
 function showReport(value) {
   report = value;
   $('diagnostics').replaceChildren();
@@ -63,7 +100,7 @@ async function validate() {
   clearTimeout(timer);
   const requestGeneration = ++generation;
   try {
-    const value = await api('validate', {text});
+    const value = await api('validate', {text, mergeNative: mergeNativeEnabled()});
     if (requestGeneration === generation) showReport(value);
   } catch (err) { if (requestGeneration === generation) { report = null; state(); message(err.message); } }
 }
@@ -85,7 +122,7 @@ function mayDiscardFields() {
 async function load() {
   if ((text !== saved || fieldErrors.size) && !confirm('Reload from disk and discard unsaved changes?')) return;
   try {
-    const value = await api('config');
+    const value = await api(`config?mergeNative=${mergeNativeEnabled() ? 'true' : 'false'}`);
     clearTimeout(timer); generation++; fieldErrors.clear();
     text = saved = value.text; revision = value.revision;
     $('path').textContent = value.path;
@@ -102,7 +139,7 @@ async function save() {
   busy = true; state();
   const submitted = text;
   try {
-    const value = await api('save', {text: submitted, revision});
+    const value = await api('save', {text: submitted, revision, mergeNative: mergeNativeEnabled()});
     saved = submitted; revision = value.revision;
     if (text === submitted) showReport(value.report);
     message(value.backup ? `Saved. Backup: ${value.backup}\nRestart the proxy separately to apply changes.` : 'No file changes.');
@@ -205,15 +242,25 @@ function reasoningForm(parent, doc, target, variant) {
   }
   parent.append(box);
 }
+// modelProtocolOf resolves the upstream protocol a variant inherits from its
+// base model (variant objects themselves carry no protocol field).
+function modelProtocolOf(doc, variant) {
+  const index = (doc.models || []).findIndex(m => Array.isArray(m.variants) && m.variants.includes(variant));
+  const base = index >= 0 ? doc.models[index] : null;
+  return object(base) ? base.protocol : '';
+}
+
 function modelFields(parent, doc, model, variant = false) {
   const fields = node('div', undefined, 'fields'); parent.append(fields);
   if (!variant) {
     field(fields,doc,model,'provider','Provider','text',(Array.isArray(doc.providers) ? doc.providers : []).filter(object).map(p=>p.name).filter(v=>typeof v==='string'));
     field(fields,doc,model,'protocol','Protocol','text',['openai-responses','anthropic-messages']);
     field(fields,doc,model,'providerModelName','Upstream model');
-  }
-  field(fields,doc,model,'clientModelName','Client name');
+  }  field(fields,doc,model,'clientModelName','Client name');
   field(fields,doc,model,'displayName','Display name');
+  if ((variant ? modelProtocolOf(doc, model) : model.protocol) === 'anthropic-messages') {
+    field(fields,doc,model,'protocolAdapter','Protocol adapter (client surface)','text',['anthropic2openai']);
+  }
   if (variant) field(fields,doc,model,'agentRunners','Agent runners (JSON; empty means all)','json');
   field(fields,doc,model,'contextWindow','Context window','number');
   field(fields,doc,model,'maxTokens','Max output tokens','number');
@@ -393,7 +440,18 @@ $('add').onclick=()=>{
 $('search').oninput=()=>renderList(parsed());
 $('raw').oninput=()=>{text=$('raw').value;selected=0;selectedVariant=selectedProvider=-1;expandedModels.clear();changed();};
 $('reload').onclick=load;$('validate').onclick=validate;$('save').onclick=save;
-$('copy').onclick=async()=>{try{await navigator.clipboard.writeText(report.previews[previewRunner].content);message('Preview copied.');}catch(err){message(err.message);}};
-$('download').onclick=()=>{const url=URL.createObjectURL(new Blob([report.previews[previewRunner].content],{type:previewRunner==='dsh'?'text/yaml':'application/toml'}));const link=node('a');link.href=url;link.download=`llm-proxy-${previewRunner}.${report.previews[previewRunner].format}`;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
+$('copy').onclick=async()=>{try{await navigator.clipboard.writeText(selectedPreviewFile().content);message('Preview copied.');}catch(err){message(err.message);}};
+$('catalog-install').onclick=async()=>{
+  if (busy) return;
+  busy = true; state();
+  try {
+    const value = await api('catalog', {text, mergeNative: mergeNativeEnabled()});
+    if (value.result === 'unchanged') message('Already up to date.');
+    else message((value.result === 'created' ? 'Created ' : 'Updated ') + value.path);
+    await validate();
+  } catch (err) { message(err.message); }
+  finally { busy = false; state(); }
+};
+$('download').onclick=()=>{const file=selectedPreviewFile();const mime=file.format==='yaml'?'text/yaml':file.format==='json'?'application/json':'application/toml';const url=URL.createObjectURL(new Blob([file.content],{type:mime}));const link=node('a');link.href=url;link.download=file.name;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
 window.addEventListener('beforeunload',event=>{if(text!==saved||fieldErrors.size){event.preventDefault();event.returnValue='';}});
 load();

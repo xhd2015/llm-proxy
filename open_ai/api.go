@@ -68,7 +68,7 @@ Options:
                                    Grok CLI session (cli-chat-proxy.grok.com)
   --grok-home DIR                  Grok config dir holding auth.json
                                    (default: ~/.grok)
-  codex-models                    print Codex model configuration; with --config, use configured routes
+  codex-models                    print Codex model configuration (native Codex models merged into the catalog; --no-merge-native to skip); with --config, use configured routes
   commandcode-models              print Grok configuration for Command Code models
   grok-models                     print Grok model configuration; with --config, use configured routes
   lint                            validate a configuration file
