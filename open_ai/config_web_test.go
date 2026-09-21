@@ -171,7 +171,7 @@ func TestConfigWebRequestProtection(t *testing.T) {
 			}
 		})
 	}
-	for _, path := range []string{"/", "/app.js", "/tree.mjs", "/style.css"} {
+	for _, path := range []string{"/", "/app.js", "/tree.mjs", "/url-state.mjs", "/style.css"} {
 		w := webTestRequest(handler, "GET", path, "")
 		if w.Code != 200 || w.Body.Len() == 0 || w.Header().Get("Cache-Control") != "no-store" || !strings.Contains(w.Header().Get("Content-Security-Policy"), "frame-ancestors 'none'") {
 			t.Fatal(path, w.Code, w.Header())

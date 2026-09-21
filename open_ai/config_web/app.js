@@ -1,8 +1,10 @@
 import {modelGroups, filterModelGroups, modelTitle} from './tree.mjs';
+import {parseEditorURL, editorSearch, previewFileIndex} from './url-state.mjs';
 
 const $ = (id) => document.getElementById(id);
-let text = '', saved = '', revision = '', tab = 'models', selected = 0, report = null;
-let previewRunner = 'dsh', previewFile = 0;
+const initialUI = parseEditorURL(location.search);
+let text = '', saved = '', revision = '', tab = initialUI.tab, selected = 0, report = null;
+let previewRunner = initialUI.runner, previewFile = 0, previewFileName = initialUI.file;
 const mergeNativeStorageKey = 'llm-proxy.merge-native';
 function mergeNativeEnabled() {
   try { return localStorage.getItem(mergeNativeStorageKey) !== '0'; } catch { return true; }
@@ -32,6 +34,13 @@ function state() {
   $('reload').disabled = $('validate').disabled = busy;
   document.querySelector('main').inert = busy;
   document.querySelector('nav').inert = busy;
+  syncURL();
+}
+function syncURL() {
+  const file = tab === 'preview' ? (selectedPreviewFile()?.name || previewFileName) : '';
+  const search = editorSearch({tab, runner: previewRunner, file});
+  const next = location.pathname + search + location.hash;
+  if (next !== location.pathname + location.search + location.hash) history.replaceState(null, '', next);
 }
 async function api(path, body) {
   const response = await fetch(`/api/${path}`, {
@@ -52,7 +61,8 @@ function previewFiles() {
 }
 function selectedPreviewFile() {
   const files = previewFiles();
-  return files[Math.min(previewFile, files.length - 1)];
+  previewFile = previewFileIndex(files, previewFileName);
+  return files[previewFile];
 }
 function renderPreview() {
   const preview = report?.previews?.[previewRunner];
@@ -62,15 +72,26 @@ function renderPreview() {
   $('preview-target').textContent = previewRunner === 'dsh' ? 'Merge into DSH settings.' : previewRunner === 'codex' ? 'Merge into ~/.codex/config.toml; this is not a complete replacement file. The .json file is the Codex model catalog for the /model picker; select it and use Update to install it.' : `Merge into ~/.${previewRunner}/config.toml; this is not a complete replacement file.`;
   document.querySelectorAll('[data-runner]').forEach(el => el.setAttribute('aria-pressed', String(el.dataset.runner === previewRunner)));
   const files = previewFiles();
+  previewFile = previewFileIndex(files, previewFileName);
   const nav = $('preview-files');
   nav.hidden = files.length < 2;
   nav.replaceChildren(...files.map((file, index) => {
-    const el = button(file.name, () => { previewFile = index; state(); });
+    const el = button(file.name, () => { previewFileName = file.name; state(); });
     el.setAttribute('aria-pressed', String(index === Math.min(previewFile, files.length - 1)));
     return el;
   }));
   $('preview-content').textContent = preview?.error || selectedPreviewFile()?.content || (report ? 'Preview unavailable. Check diagnostics below.' : 'Validate the current draft to preview it.');
+  renderCodexConfigWarnings(preview);
   updateCatalogInstall();
+}
+function renderCodexConfigWarnings(preview) {
+  const list = $('codex-config-warnings');
+  const warnings = previewRunner === 'codex' && Array.isArray(preview?.warnings) ? preview.warnings.slice(0, 2) : [];
+  list.hidden = warnings.length === 0;
+  list.replaceChildren(...warnings.map(warning => {
+    const message = warning && warning.message ? warning.message : String(warning || '');
+    return node('li', message, 'warning');
+  }));
 }
 function updateCatalogInstall() {
   const install = $('catalog-install');
@@ -81,7 +102,7 @@ function updateCatalogInstall() {
   install.textContent = file.targetState === 'missing' ? 'Create' : file.targetState === 'same' ? 'Updated' : 'Update';
   install.disabled = file.targetState === 'same';
 }
-document.querySelectorAll('[data-runner]').forEach(el => el.onclick = () => { previewRunner = el.dataset.runner; previewFile = 0; state(); });
+document.querySelectorAll('[data-runner]').forEach(el => el.onclick = () => { previewRunner = el.dataset.runner; previewFileName = ''; state(); });
 $('merge-native').checked = mergeNativeEnabled();
 $('merge-native').onchange = () => {
   try { localStorage.setItem(mergeNativeStorageKey, $('merge-native').checked ? '1' : '0'); } catch {}
@@ -429,7 +450,7 @@ function render() {
   if(tab==='models'||tab==='providers'){const doc=parsed();renderList(doc);renderForm(doc);}
   if(tab==='raw')$('raw').value=text;
 }
-document.querySelectorAll('[data-tab]').forEach(el=>el.onclick=()=>{if(!mayDiscardFields())return;tab=el.dataset.tab;selected=0;selectedVariant=selectedProvider=-1;$('search').value='';render();validate();});
+document.querySelectorAll('[data-tab]').forEach(el=>el.onclick=()=>{if(!mayDiscardFields())return;tab=el.dataset.tab;selected=0;selectedVariant=selectedProvider=-1;$('search').value='';render();state();validate();});
 $('add').onclick=()=>{
   if(!mayDiscardFields())return;const doc=parsed();if(!doc){message('Repair the JSON first.');return;}
   if(tab==='models'){addModel(doc,selectedProvider>=0?doc.providers?.[selectedProvider]?.name || '':doc.models?.[selected]?.provider || '');return;}

@@ -263,6 +263,54 @@ func TestGenerateConfigCodexCatalog(t *testing.T) {
 	}
 }
 
+func TestCodexExportIncludesHTTPProxyResponses(t *testing.T) {
+	config := proxyConfig{
+		Listen: "127.0.0.1:8890",
+		Providers: []configProvider{{
+			Name: "ais", Kind: "http-proxy", BaseURL: "http://127.0.0.1:15721/v1", DummyToken: "PROXY_MANAGED",
+		}},
+		Models: []configModel{
+			{
+				Protocol: "anthropic-messages", Provider: "ais", ProviderModelName: "claude-fable-5",
+				ClientModelName: "ais-glm-5-2", DisplayName: "AIS - GLM-5.2",
+				Reasoning: &configReasoning{Disabled: true},
+			},
+			{
+				Protocol: "openai-responses", Provider: "ais", ProviderModelName: "llm-gateway--glm-5.2",
+				ClientModelName: "ais-glm-5-2-from-codex", DisplayName: "AIS - GLM-5.2",
+				Reasoning: &configReasoning{Disabled: true},
+			},
+		},
+	}
+	routes, err := validateProxyConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generateConfigModels(config.Listen, routes, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output, "#   ais-glm-5-2-from-codex\n") || !strings.Contains(output, `model = "ais-glm-5-2-from-codex"`) {
+		t.Fatalf("http-proxy Responses route missing from Codex export:\n%s", output)
+	}
+	if strings.Contains(output, "#   ais-glm-5-2\n") || strings.Contains(output, "model = \"ais-glm-5-2\"\n") {
+		t.Fatalf("unadapted Anthropic AIS route must not be a Codex model:\n%s", output)
+	}
+	if !strings.Contains(output, "# Not exported (anthropic-messages): ais-glm-5-2\n") {
+		t.Fatalf("unadapted Anthropic AIS route must stay in the adapter hint:\n%s", output)
+	}
+	catalog, err := generateConfigCodexCatalog(config.Listen, routes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(catalog, `"slug": "ais-glm-5-2-from-codex"`) {
+		t.Fatalf("catalog missing http-proxy Responses slug:\n%s", catalog)
+	}
+	if strings.Contains(catalog, `"slug": "ais-glm-5-2"`) {
+		t.Fatalf("catalog must not include the unadapted Anthropic slug:\n%s", catalog)
+	}
+}
+
 func TestWithoutRunnerProviderRemovesSelfProxyRoutes(t *testing.T) {
 	routes := []effectiveRoute{
 		{clientModelName: "codex", provider: configProvider{Kind: "codex"}},

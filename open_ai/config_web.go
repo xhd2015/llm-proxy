@@ -118,10 +118,16 @@ type configWebFile struct {
 }
 
 type configWebPreview struct {
-	Content string          `json:"content"`
-	Format  string          `json:"format"`
-	Error   string          `json:"error,omitempty"`
-	Files   []configWebFile `json:"files,omitempty"`
+	Content  string                    `json:"content"`
+	Format   string                    `json:"format"`
+	Error    string                    `json:"error,omitempty"`
+	Files    []configWebFile           `json:"files,omitempty"`
+	Warnings []configWebPreviewWarning `json:"warnings,omitempty"`
+}
+
+type configWebPreviewWarning struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 func inspectConfigWebDraft(text string, options configModelsOptions) configWebReport {
@@ -134,6 +140,7 @@ func inspectConfigWebDraft(text string, options configModelsOptions) configWebRe
 				preview.Format = "yaml"
 			}
 			if runner == "codex" {
+				preview.Warnings = inspectCodexUserConfig()
 				export, err := generateCodexExport(config.Listen, routes, options)
 				if err != nil {
 					preview.Error = err.Error()
@@ -203,7 +210,7 @@ func newConfigWebHandlerWithNative(store *configWebStore, host string, native *n
 				http.Error(w, "method not allowed", 405)
 				return
 			}
-			if r.URL.Path != "/" && r.URL.Path != "/app.js" && r.URL.Path != "/tree.mjs" && r.URL.Path != "/style.css" {
+			if r.URL.Path != "/" && r.URL.Path != "/app.js" && r.URL.Path != "/tree.mjs" && r.URL.Path != "/url-state.mjs" && r.URL.Path != "/style.css" {
 				http.NotFound(w, r)
 				return
 			}
@@ -386,4 +393,156 @@ func writeCodexCatalogFile(content string) (string, error) {
 		return "updated", nil
 	}
 	return "created", nil
+}
+
+// codexUserConfigPathFn resolves the on-disk Codex config.toml; tests redirect it.
+var codexUserConfigPathFn = codexUserConfigPath
+
+func codexUserConfigPath() string {
+	if dir := strings.TrimSpace(os.Getenv("CODEX_HOME")); dir != "" {
+		return filepath.Join(dir, "config.toml")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return ""
+	}
+	return filepath.Join(home, ".codex", "config.toml")
+}
+
+// inspectCodexUserConfig reports at most two warnings about the on-disk
+// Codex config: missing model_provider = "llm-proxy", and model_catalog_json
+// not pointing at the generated catalog file.
+func inspectCodexUserConfig() []configWebPreviewWarning {
+	path := codexUserConfigPathFn()
+	display := displayHomePath(path)
+	if display == "" {
+		display = "~/.codex/config.toml"
+	}
+	keys := map[string]string{}
+	if path != "" {
+		if data, err := os.ReadFile(path); err == nil {
+			keys = parseCodexTopLevelTOML(string(data))
+		}
+	}
+	var warnings []configWebPreviewWarning
+	if keys["model_provider"] != "llm-proxy" {
+		warnings = append(warnings, configWebPreviewWarning{
+			Code:    "model_provider",
+			Message: display + ` is missing model_provider = "llm-proxy". Codex will send proxy models to ChatGPT and they 400. Paste that line next to model =.`,
+		})
+	}
+	catalogWant := codexCatalogTargetPathFn()
+	if !catalogPathMatches(keys["model_catalog_json"], catalogWant) {
+		wantDisplay := displayHomePath(catalogWant)
+		if wantDisplay == "" {
+			wantDisplay = "~/.codex/" + configModelsCatalogFileName
+		}
+		warnings = append(warnings, configWebPreviewWarning{
+			Code:    "model_catalog_json",
+			Message: "model_catalog_json is not set to " + wantDisplay + ". The /model picker will not use the catalog file.",
+		})
+	}
+	if len(warnings) > 2 {
+		warnings = warnings[:2]
+	}
+	return warnings
+}
+
+// parseCodexTopLevelTOML reads bare key = value pairs until the first TOML
+// table. Comments and arrays are ignored; quoted strings are unquoted.
+func parseCodexTopLevelTOML(text string) map[string]string {
+	keys := map[string]string{}
+	for _, raw := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			break
+		}
+		eq := strings.Index(line, "=")
+		if eq <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:eq])
+		if key == "" || strings.ContainsAny(key, ".[]") {
+			continue
+		}
+		value := strings.TrimSpace(line[eq+1:])
+		if unquoted, ok := unquoteTOMLValue(value); ok {
+			keys[key] = unquoted
+		}
+	}
+	return keys
+}
+
+func unquoteTOMLValue(value string) (string, bool) {
+	if value == "" {
+		return "", false
+	}
+	if strings.HasPrefix(value, "[") {
+		return "", false
+	}
+	if value[0] == '"' || value[0] == '\'' {
+		quote := value[0]
+		end := 1
+		for end < len(value) {
+			if value[end] == quote && value[end-1] != '\\' {
+				inner := value[1:end]
+				if quote == '"' {
+					inner = strings.ReplaceAll(inner, `\"`, `"`)
+					inner = strings.ReplaceAll(inner, `\\`, `\`)
+				}
+				return inner, true
+			}
+			end++
+		}
+		return "", false
+	}
+	if i := strings.Index(value, "#"); i >= 0 {
+		value = strings.TrimSpace(value[:i])
+	}
+	return value, value != ""
+}
+
+func catalogPathMatches(got, want string) bool {
+	if got == "" || want == "" {
+		return false
+	}
+	gotPath := filepath.Clean(expandUserPath(got))
+	wantPath := filepath.Clean(expandUserPath(want))
+	return gotPath == wantPath
+}
+
+func expandUserPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return path
+		}
+		if path == "~" {
+			return home
+		}
+		return filepath.Join(home, path[2:])
+	}
+	return path
+}
+
+func displayHomePath(path string) string {
+	if path == "" {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	if path == home {
+		return "~"
+	}
+	prefix := home + string(os.PathSeparator)
+	if strings.HasPrefix(path, prefix) {
+		return "~/" + filepath.ToSlash(path[len(prefix):])
+	}
+	return path
 }
