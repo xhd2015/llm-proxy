@@ -7,12 +7,18 @@ export function parseEditorURL(search) {
   const tab = editorTabs.includes(params.get('tab')) ? params.get('tab') : 'models';
   const runner = editorRunners.includes(params.get('runner')) ? params.get('runner') : 'dsh';
   const file = params.get('file') || '';
-  return {tab, runner, file};
+  const model = params.get('model') || '';
+  const edit = params.get('edit') === 'json' ? 'json' : '';
+  return {tab, runner, file, model, edit};
 }
 
-export function editorSearch({tab = 'models', runner = 'dsh', file = ''} = {}) {
+export function editorSearch({tab = 'models', runner = 'dsh', file = '', model = '', edit = ''} = {}) {
   const params = new URLSearchParams();
   if (tab && tab !== 'models') params.set('tab', tab);
+  if (tab === 'models') {
+    if (model) params.set('model', model);
+    if (edit === 'json') params.set('edit', 'json');
+  }
   if (tab === 'preview') {
     if (runner && runner !== 'dsh') params.set('runner', runner);
     if (file) params.set('file', file);

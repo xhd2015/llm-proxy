@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -159,6 +161,7 @@ func TestConfigWebRequestProtection(t *testing.T) {
 		{"trailing JSON", "POST", "/api/save", "127.0.0.1:12345", "", `{} {}`, "application/json", 400},
 		{"unknown endpoint", "GET", "/api/auth", "127.0.0.1:12345", "", "", "", 404},
 		{"static path escape", "GET", "/config.json", "127.0.0.1:12345", "", "", "", 404},
+		{"monaco path escape", "GET", "/vs/../app.js", "127.0.0.1:12345", "", "", "", 404},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := httptest.NewRequest(tc.method, "http://"+tc.host+tc.path, strings.NewReader(tc.body))
@@ -171,11 +174,23 @@ func TestConfigWebRequestProtection(t *testing.T) {
 			}
 		})
 	}
-	for _, path := range []string{"/", "/app.js", "/tree.mjs", "/url-state.mjs", "/style.css"} {
+	for _, path := range []string{"/", "/app.js", "/tree.mjs", "/url-state.mjs", "/style.css", "/model.schema.json", "/vs/editor/editor.main.js", "/vs/editor/editor.main.css", "/vs/editor/editor.worker.js", "/vs/language/json/json.worker.js"} {
 		w := webTestRequest(handler, "GET", path, "")
-		if w.Code != 200 || w.Body.Len() == 0 || w.Header().Get("Cache-Control") != "no-store" || !strings.Contains(w.Header().Get("Content-Security-Policy"), "frame-ancestors 'none'") {
+		csp := w.Header().Get("Content-Security-Policy")
+		if w.Code != 200 || w.Body.Len() == 0 || w.Header().Get("Cache-Control") != "no-store" {
 			t.Fatal(path, w.Code, w.Header())
 		}
+		if !strings.Contains(csp, "frame-ancestors 'none'") || !strings.Contains(csp, "script-src 'self'") || strings.Contains(csp, "unsafe-eval") || !strings.Contains(csp, "style-src 'self' 'unsafe-inline'") || !strings.Contains(csp, "font-src 'self' data:") {
+			t.Fatal(path, csp)
+		}
+	}
+	mainJS := webTestRequest(handler, "GET", "/vs/editor/editor.main.js", "")
+	if !strings.Contains(mainJS.Header().Get("Content-Type"), "javascript") || !strings.Contains(mainJS.Body.String(), "createDiffEditor") {
+		t.Fatal(mainJS.Header().Get("Content-Type"), mainJS.Body.Len())
+	}
+	mainCSS := webTestRequest(handler, "GET", "/vs/editor/editor.main.css", "")
+	if !strings.Contains(mainCSS.Header().Get("Content-Type"), "text/css") || !strings.Contains(mainCSS.Body.String(), "monaco-diff-editor") {
+		t.Fatal(mainCSS.Header().Get("Content-Type"), mainCSS.Body.Len())
 	}
 }
 
@@ -312,4 +327,124 @@ func TestConfigWebCLIArguments(t *testing.T) {
 			t.Fatalf("removed nested command %q: %v", args, err)
 		}
 	}
+}
+
+// structJSONTags lists the sorted json field names of a config struct; the
+// editor schema must expose exactly these properties.
+func structJSONTags(t reflect.Type) []string {
+	names := make([]string, 0, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		tag := strings.Split(t.Field(i).Tag.Get("json"), ",")[0]
+		if tag == "" || tag == "-" {
+			continue
+		}
+		names = append(names, tag)
+	}
+	sort.Strings(names)
+	return names
+}
+
+type schemaProperty struct {
+	Enum  []any           `json:"enum"`
+	Items *schemaProperty `json:"items"`
+}
+
+type schemaDefinition struct {
+	Properties map[string]schemaProperty `json:"properties"`
+	Required   []string                  `json:"required"`
+}
+
+func TestConfigWebModelSchema(t *testing.T) {
+	t.Parallel()
+	handler := webTestHandler(webTestStore(t, lintValid))
+	served := webTestRequest(handler, "GET", "/model.schema.json", "")
+	if served.Code != 200 || served.Body.Len() == 0 {
+		t.Fatal(served.Code, served.Body.Len())
+	}
+	if got := served.Header().Get("Content-Type"); !strings.Contains(got, "json") {
+		t.Fatal(got)
+	}
+	var schema struct {
+		Definitions map[string]schemaDefinition `json:"definitions"`
+	}
+	if err := json.Unmarshal(served.Body.Bytes(), &schema); err != nil {
+		t.Fatal(err)
+	}
+	model := schema.Definitions["model"]
+	variant := schema.Definitions["variant"]
+	if model.Properties == nil || variant.Properties == nil {
+		t.Fatal("schema lacks model/variant definitions")
+	}
+	for _, tc := range []struct {
+		name string
+		got  map[string]schemaProperty
+		want reflect.Type
+	}{
+		{"model", model.Properties, reflect.TypeFor[configModel]()},
+		{"variant", variant.Properties, reflect.TypeFor[configVariant]()},
+	} {
+		got := make([]string, 0, len(tc.got))
+		for name := range tc.got {
+			got = append(got, name)
+		}
+		sort.Strings(got)
+		want := structJSONTags(tc.want)
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("%s properties %v differ from %s json tags %v", tc.name, got, tc.want, want)
+		}
+	}
+	if want := []string{"provider", "protocol", "providerModelName", "reasoning"}; !sameStrings(model.Required, want) {
+		t.Fatalf("model required %v, want %v", model.Required, want)
+	}
+	for _, name := range variant.Required {
+		if name == "reasoning" {
+			t.Fatal("variant must not require reasoning")
+		}
+	}
+	if got := model.Properties["protocol"].Enum; !enumHas(got, "openai-responses", "anthropic-messages") {
+		t.Fatalf("protocol enum %v", got)
+	}
+	if got := model.Properties["protocolAdapter"].Enum; !enumHas(got, "anthropic2openai") || enumHas(got, "openai-responses") {
+		t.Fatalf("protocolAdapter enum %v", got)
+	}
+	if got := variant.Properties["agentRunners"].Items.Enum; !enumHas(got, "dsh", "codex", "grok") {
+		t.Fatalf("agentRunners enum %v", got)
+	}
+	if got := variant.Properties["inputs"].Items.Enum; got != nil {
+		t.Fatalf("inputs items should come from the input definition, got %v", got)
+	}
+	if !strings.Contains(served.Body.String(), `"text"`) || !strings.Contains(served.Body.String(), `"xhigh"`) {
+		t.Fatal("schema lacks input modality or effort enums")
+	}
+}
+
+func sameStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	left := append([]string(nil), got...)
+	right := append([]string(nil), want...)
+	sort.Strings(left)
+	sort.Strings(right)
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func enumHas(enum []any, want ...string) bool {
+	have := make(map[string]bool, len(enum))
+	for _, value := range enum {
+		if text, ok := value.(string); ok {
+			have[text] = true
+		}
+	}
+	for _, value := range want {
+		if !have[value] {
+			return false
+		}
+	}
+	return len(want) > 0
 }

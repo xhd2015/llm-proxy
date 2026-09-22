@@ -441,27 +441,41 @@ func TestConfigWebCatalogInstallLifecycle(t *testing.T) {
 	handler := webTestHandler(store)
 	targetPath := filepath.Join(tempHome, ".codex", configModelsCatalogFileName)
 
-	reportField := func() (string, string) {
+	catalog := func() (configWebFile, string) {
+		t.Helper()
 		loaded := webTestRequest(handler, "GET", "/api/config", "")
+		if loaded.Code != 200 {
+			t.Fatalf("config: %d %s", loaded.Code, loaded.Body.String())
+		}
 		var value struct {
 			Report configWebReport `json:"report"`
 		}
 		if err := json.Unmarshal(loaded.Body.Bytes(), &value); err != nil {
 			t.Fatal(err)
 		}
+		for _, preview := range value.Report.Previews {
+			for _, file := range preview.Files {
+				if file.Name == configModelsCatalogFileName {
+					continue
+				}
+				if file.TargetPath != "" || file.TargetState != "" || file.TargetContent != "" {
+					t.Fatalf("non-catalog preview carries install metadata: %+v", file)
+				}
+			}
+		}
 		for _, file := range value.Report.Previews["codex"].Files {
 			if file.Name == configModelsCatalogFileName {
-				return file.TargetPath, file.TargetState
+				return file, loaded.Body.String()
 			}
 		}
 		t.Fatal("catalog file missing from preview")
-		return "", ""
+		return configWebFile{}, ""
 	}
 
-	// 1. Missing target: state "missing".
-	targetPathReported, state := reportField()
-	if targetPathReported != targetPath || state != "missing" {
-		t.Fatalf("targetPath=%q state=%q, want %q/missing", targetPathReported, state, targetPath)
+	// 1. Missing target: state "missing", no installed bytes.
+	file, body := catalog()
+	if file.TargetPath != targetPath || file.TargetState != "missing" || file.TargetContent != "" || strings.Contains(body, `"targetContent"`) {
+		t.Fatalf("missing catalog: path=%q state=%q content=%q", file.TargetPath, file.TargetState, file.TargetContent)
 	}
 
 	// 2. Create: file lands on disk byte-equal to the generated catalog.
@@ -483,9 +497,9 @@ func TestConfigWebCatalogInstallLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, generatedState := reportField()
-	if generatedState != "same" {
-		t.Fatalf("after create, state = %q, want same", generatedState)
+	file, body = catalog()
+	if file.TargetState != "same" || file.TargetContent != "" || strings.Contains(body, `"targetContent"`) {
+		t.Fatalf("after create, state = %q content = %q, want same and no targetContent", file.TargetState, file.TargetContent)
 	}
 	generated := inspectConfigWebDraft(string(draft), configModelsOptions{}).Previews["codex"].Files[1].Content
 	if string(written) != generated {
@@ -501,12 +515,13 @@ func TestConfigWebCatalogInstallLifecycle(t *testing.T) {
 		t.Fatalf("idempotent write = %q, want unchanged", result.Result)
 	}
 
-	// 4. Hand-edited target: state "differ", POST updates.
+	// 4. Hand-edited target: state "differ" and the installed bytes are returned for the diff.
 	if err := os.WriteFile(targetPath, []byte(`{"models":[]}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, state := reportField(); state != "differ" {
-		t.Fatalf("hand-edited state = %q, want differ", state)
+	file, body = catalog()
+	if file.TargetState != "differ" || file.TargetContent != "{\"models\":[]}\n" || !strings.Contains(body, `"targetContent"`) {
+		t.Fatalf("hand-edited catalog: state=%q content=%q", file.TargetState, file.TargetContent)
 	}
 	updated := webTestRequest(handler, "POST", "/api/catalog", `{"text":`+strconv.Quote(string(draft))+`}`)
 	if err := json.Unmarshal(updated.Body.Bytes(), &result); err != nil {
@@ -515,8 +530,9 @@ func TestConfigWebCatalogInstallLifecycle(t *testing.T) {
 	if result.Result != "updated" {
 		t.Fatalf("overwrite result = %q, want updated", result.Result)
 	}
-	if _, state := reportField(); state != "same" {
-		t.Fatalf("after update, state = %q, want same", state)
+	file, body = catalog()
+	if file.TargetState != "same" || file.TargetContent != "" || strings.Contains(body, `"targetContent"`) {
+		t.Fatalf("after update, state = %q content = %q, want same and no targetContent", file.TargetState, file.TargetContent)
 	}
 
 	// 5. Invalid draft: 422 and no write.
@@ -543,6 +559,18 @@ func TestConfigWebCatalogInstallLifecycle(t *testing.T) {
 	noCatalog := webTestRequest(handler, "POST", "/api/catalog", `{"text":`+strconv.Quote(string(dshOnly))+`}`)
 	if noCatalog.Code != http.StatusConflict {
 		t.Fatalf("no-catalog status = %d, want 409: %s", noCatalog.Code, noCatalog.Body.String())
+	}
+
+	// 7. Unreadable target: differ, no installed text, and a read note.
+	if err := os.Remove(targetPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(targetPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file, body = catalog()
+	if file.TargetState != "differ" || file.TargetContent != "" || strings.Contains(body, `"targetContent"`) || !strings.Contains(file.Note, "Could not read "+targetPath) {
+		t.Fatalf("unreadable catalog: state=%q content=%q note=%q", file.TargetState, file.TargetContent, file.Note)
 	}
 }
 

@@ -17,7 +17,7 @@
   assert(/\/(?:private\/)?tmp\/llm-proxy-web-/.test($('path').textContent), 'Use a temporary llm-proxy-web-* fixture, never a home config');
   clickTab('raw');
   const original = JSON.parse($('raw').value);
-  assert(!location.hash && !location.search, 'Editor URL should not need credentials');
+  assert(!location.hash && !/token|credential|secret/i.test(location.search), 'Editor URL should not need credentials');
   clickTab('models');
   const branch = document.querySelector('[data-level="model"][data-model-index="0"]');
   assert(branch && branch.parentElement.parentElement.dataset.level === 'provider', 'Missing provider/model nesting');
@@ -30,6 +30,7 @@
     assert(leaf && !leaf.parentElement.hidden, 'Search did not expose matching variant');
     leaf.querySelector('button').click();
     assert(field('Client name').value === query, 'Variant did not open its own editor');
+    assert(new URLSearchParams(location.search).get('model') === query, 'Variant selection not encoded in the URL');
     edit($('search'),'');
     assert(document.querySelector('[data-model-index="0"] > ul').hidden,'Selecting a search result changed saved expansion');
     assert(![...document.querySelectorAll('label.field span')].some(el=>el.textContent==='Upstream model'), 'Variant edits base-only fields');
@@ -141,5 +142,20 @@
   assert(field('Provider name').value === original.providers[0].name, 'Provider form did not load');
   clickTab('models');
   await wait(valid);
-  return {passed: ['token-free access', 'provider tree', 'variant-only edits', 'search ancestry and expansion', 'provider-scoped add', 'form round-trip', 'malformed repair', 'modalities', 'variant inheritance', 'duplicate refusal', 'DSH preview', 'save backup', 'reload', 'provider form']};
+  const baseName = original.models[0].clientModelName || original.models[0].providerModelName;
+  assert(new URLSearchParams(location.search).get('model') === baseName, 'Models tab does not encode the open model in the URL');
+  assert(!new URLSearchParams(location.search).get('edit'), 'Form mode leaked edit into the URL');
+  const jsonToggle = [...document.querySelectorAll('.mode-toggle button')].find(el => el.textContent === 'JSON');
+  jsonToggle.click();
+  await wait(() => document.querySelector('#json-editor .monaco-editor'));
+  await wait(() => (document.querySelector('#json-editor .view-lines')?.textContent || '').includes('"protocol"'), 'json editor rendered');
+  assert(new URLSearchParams(location.search).get('edit') === 'json', 'JSON mode not encoded in the URL');
+  const editorText = document.querySelector('#json-editor .view-lines').textContent;
+  assert(editorText.includes(original.models[0].providerModelName), 'JSON editor does not show the open model');
+  assert(JSON.stringify(JSON.parse($('raw').value)) === JSON.stringify(JSON.parse(validText)), 'Opening the JSON editor changed the draft');
+  const formToggle = [...document.querySelectorAll('.mode-toggle button')].find(el => el.textContent === 'Form');
+  formToggle.click();
+  assert(field('Client name').value === (original.models[0].clientModelName || ''), 'Returning to the form lost the model fields');
+  assert(new URLSearchParams(location.search).get('edit') === null, 'Form mode kept edit=json in the URL');
+  return {passed: ['token-free access', 'provider tree', 'variant-only edits', 'variant URL param', 'search ancestry and expansion', 'provider-scoped add', 'form round-trip', 'malformed repair', 'modalities', 'variant inheritance', 'duplicate refusal', 'DSH preview', 'save backup', 'reload', 'provider form', 'model URL param', 'JSON editor toggle']};
 })()

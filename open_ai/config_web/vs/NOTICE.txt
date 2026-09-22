@@ -1,0 +1,12 @@
+Monaco Editor 0.56.0
+https://github.com/microsoft/monaco-editor
+MIT License. See LICENSE and ThirdPartyNotices.txt in this directory.
+
+Bundled from the ESM build (editor, diff editor, and JSON language) so the
+config page can load it from the same origin. The published AMD loader
+evaluates scripts and starts blob workers, which this page does not allow.
+
+  editor/editor.main.js         editor and diff editor
+  editor/editor.main.css        stylesheet from monaco-editor/min
+  editor/editor.worker.js       diff worker (ES module)
+  language/json/json.worker.js  JSON worker (ES module)

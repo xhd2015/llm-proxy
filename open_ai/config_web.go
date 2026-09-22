@@ -16,13 +16,14 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/xhd2015/dot-pkgs/go-pkgs/shell/open"
 	"github.com/xhd2015/less-gen/flags"
 	"golang.org/x/term"
 )
 
-//go:embed config_web/*
+//go:embed config_web
 var configWebAssets embed.FS
 
 const configWebHelp = `
@@ -109,12 +110,13 @@ type configWebReport struct {
 }
 
 type configWebFile struct {
-	Name        string `json:"name"`
-	Format      string `json:"format"`
-	Content     string `json:"content"`
-	TargetPath  string `json:"targetPath,omitempty"`
-	TargetState string `json:"targetState,omitempty"`
-	Note        string `json:"note,omitempty"`
+	Name          string `json:"name"`
+	Format        string `json:"format"`
+	Content       string `json:"content"`
+	TargetPath    string `json:"targetPath,omitempty"`
+	TargetState   string `json:"targetState,omitempty"`
+	TargetContent string `json:"targetContent,omitempty"`
+	Note          string `json:"note,omitempty"`
 }
 
 type configWebPreview struct {
@@ -162,7 +164,16 @@ func inspectConfigWebDraft(text string, options configModelsOptions) configWebRe
 						}
 						if targetPath := codexCatalogTargetPathFn(); targetPath != "" {
 							catalogFile.TargetPath = targetPath
-							catalogFile.TargetState = codexCatalogTargetState(targetPath, export.catalog)
+							state, content, readNote := codexCatalogTarget(targetPath, export.catalog)
+							catalogFile.TargetState = state
+							catalogFile.TargetContent = content
+							if readNote != "" {
+								if catalogFile.Note != "" {
+									catalogFile.Note += " " + readNote
+								} else {
+									catalogFile.Note = readNote
+								}
+							}
 						}
 						preview.Files = append(preview.Files, catalogFile)
 					}
@@ -200,7 +211,9 @@ func newConfigWebHandlerWithNative(store *configWebStore, host string, native *n
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+		// Monaco lays lines out with inline styles, and its stylesheet uses
+		// data-URI fonts and images. Scripts stay on this origin.
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
 		if r.Host != host || (r.Header.Get("Origin") != "" && r.Header.Get("Origin") != "http://"+host) {
 			http.Error(w, "forbidden origin or host", http.StatusForbidden)
 			return
@@ -210,7 +223,7 @@ func newConfigWebHandlerWithNative(store *configWebStore, host string, native *n
 				http.Error(w, "method not allowed", 405)
 				return
 			}
-			if r.URL.Path != "/" && r.URL.Path != "/app.js" && r.URL.Path != "/tree.mjs" && r.URL.Path != "/url-state.mjs" && r.URL.Path != "/style.css" {
+			if !configWebAssetAllowed(r.URL.Path) {
 				http.NotFound(w, r)
 				return
 			}
@@ -332,20 +345,37 @@ func codexCatalogTargetPath() string {
 	return filepath.Join(home, ".codex", configModelsCatalogFileName)
 }
 
-// codexCatalogTargetState classifies the installed catalog against the
-// generated content: "missing", "differ", or "same".
-func codexCatalogTargetState(targetPath, generated string) string {
+// codexCatalogTarget classifies the installed catalog against the generated
+// content. state is "missing", "differ", or "same". content is the installed
+// text when it was readable and differs. note is set when the target cannot
+// be read as text, so the editor does not treat a failed read as an empty file.
+func codexCatalogTarget(targetPath, generated string) (state, content, note string) {
 	data, err := os.ReadFile(targetPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "missing"
+			return "missing", "", ""
 		}
-		return "differ"
+		return "differ", "", fmt.Sprintf("Could not read %s.", targetPath)
 	}
-	if string(data) == generated {
-		return "same"
+	if !utf8.Valid(data) {
+		return "differ", "", fmt.Sprintf("Could not read %s.", targetPath)
 	}
-	return "differ"
+	text := string(data)
+	if text == generated {
+		return "same", "", ""
+	}
+	return "differ", text, ""
+}
+
+func configWebAssetAllowed(path string) bool {
+	switch path {
+	case "/", "/app.js", "/tree.mjs", "/url-state.mjs", "/style.css", "/model.schema.json":
+		return true
+	}
+	if !strings.HasPrefix(path, "/vs/") || strings.HasSuffix(path, "/") || strings.Contains(path, "..") || strings.Contains(path, `\`) {
+		return false
+	}
+	return true
 }
 
 // writeCodexCatalogFile installs the generated catalog atomically (temp file

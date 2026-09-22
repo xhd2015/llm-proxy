@@ -5,6 +5,7 @@ const $ = (id) => document.getElementById(id);
 const initialUI = parseEditorURL(location.search);
 let text = '', saved = '', revision = '', tab = initialUI.tab, selected = 0, report = null;
 let previewRunner = initialUI.runner, previewFile = 0, previewFileName = initialUI.file;
+let editJSON = initialUI.edit === 'json';
 const mergeNativeStorageKey = 'llm-proxy.merge-native';
 function mergeNativeEnabled() {
   try { return localStorage.getItem(mergeNativeStorageKey) !== '0'; } catch { return true; }
@@ -38,7 +39,8 @@ function state() {
 }
 function syncURL() {
   const file = tab === 'preview' ? (selectedPreviewFile()?.name || previewFileName) : '';
-  const search = editorSearch({tab, runner: previewRunner, file});
+  const open = tab === 'models' ? openModelRoute() : null;
+  const search = editorSearch({tab, runner: previewRunner, file, model: open?.name || '', edit: editJSON && tab === 'models' ? 'json' : ''});
   const next = location.pathname + search + location.hash;
   if (next !== location.pathname + location.search + location.hash) history.replaceState(null, '', next);
 }
@@ -64,6 +66,236 @@ function selectedPreviewFile() {
   previewFile = previewFileIndex(files, previewFileName);
   return files[previewFile];
 }
+function previewFileLabel(file) {
+  if (file.targetState === 'missing') return file.name + ' · new';
+  if (file.targetState === 'differ') return file.name + ' · changed';
+  return file.name;
+}
+function showCatalogDiff(preview, file) {
+  if (preview?.error || previewRunner !== 'codex' || file?.name !== 'llm-proxy-codex.json') return false;
+  if (file.targetState === 'missing') return true;
+  return file.targetState === 'differ' && typeof file.targetContent === 'string';
+}
+function catalogStatus(file) {
+  if (previewRunner !== 'codex' || file?.name !== 'llm-proxy-codex.json') return '';
+  if (file.targetState === 'missing') return `Not installed. Create writes ${file.targetPath}.`;
+  if (file.targetState === 'same') return 'Installed file matches this preview.';
+  if (file.targetState === 'differ' && typeof file.targetContent === 'string') return `Update will replace ${file.targetPath}.`;
+  if (file.targetState === 'differ' && file.note) return file.note;
+  return '';
+}
+const previewSideBySide = window.matchMedia('(min-width: 761px)');
+let diffEditor, diffOriginal, diffModified, diffToken = 0, monacoLoad;
+previewSideBySide.addEventListener('change', () => {
+  diffEditor?.updateOptions({ renderSideBySide: previewSideBySide.matches });
+});
+function loadMonaco() {
+  if (!monacoLoad) {
+    window.MonacoEnvironment = {
+      getWorker(_id, label) {
+        const url = label === 'json' ? '/vs/language/json/json.worker.js' : '/vs/editor/editor.worker.js';
+        return new Worker(url, { type: 'module', name: label });
+      },
+    };
+    if (!document.querySelector('link[href="/vs/editor/editor.main.css"]')) {
+      const link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = '/vs/editor/editor.main.css';
+      document.head.append(link);
+    }
+    monacoLoad = import('/vs/editor/editor.main.js').then(mod => mod.default);
+  }
+  return monacoLoad;
+}
+function ensureCatalogDiff(monaco, file) {
+  const originalText = file.targetState === 'missing' ? '' : file.targetContent;
+  const modifiedText = file.content || '';
+  if (!diffEditor) {
+    diffEditor = monaco.editor.createDiffEditor($('preview-diff'), {
+      readOnly: true,
+      originalEditable: false,
+      renderSideBySide: previewSideBySide.matches,
+      automaticLayout: true,
+      scrollBeyondLastLine: false,
+      minimap: { enabled: false },
+      wordWrap: 'on',
+    });
+    diffOriginal = monaco.editor.createModel(originalText, 'json');
+    diffModified = monaco.editor.createModel(modifiedText, 'json');
+    diffEditor.setModel({ original: diffOriginal, modified: diffModified });
+  } else {
+    if (diffOriginal.getValue() !== originalText) diffOriginal.setValue(originalText);
+    if (diffModified.getValue() !== modifiedText) diffModified.setValue(modifiedText);
+    diffEditor.updateOptions({ renderSideBySide: previewSideBySide.matches });
+  }
+  diffEditor.layout();
+}
+
+// The model JSON editor edits exactly one model or variant object. Its Monaco
+// models use dedicated inmemory URIs so the schema registration below never
+// applies to the preview diff models on the same page.
+const modelEditURIPrefix = 'inmemory://llm-proxy/model-edit/';
+let jsonEditor, jsonModel, jsonModelKey = '', jsonInvalid = false, jsonApplying = false, schemaLoad, jsonApplyTimer, jsonPoll, jsonAppliedText = '';
+const canonicalJSON = (text) => JSON.stringify(sortJSON(JSON.parse(text)));
+function sortJSON(value) {
+  if (Array.isArray(value)) return value.map(sortJSON);
+  if (object(value)) {
+    const out = {};
+    for (const key of Object.keys(value).sort()) out[key] = sortJSON(value[key]);
+    return out;
+  }
+  return value;
+}
+function loadModelSchema(monaco) {
+  if (!schemaLoad) {
+    schemaLoad = fetch('/model.schema.json').then(response => {
+      if (!response.ok) throw new Error('model schema HTTP ' + response.status);
+      return response.json();
+    }).then(schemaDoc => {
+      // The vendored bundle exports the JSON feature's jsonDefaults singleton
+      // directly (Monaco 0.56 has no languages.json namespace). The served
+      // document keeps model/variant under definitions (mirroring the Go
+      // structs); each editor kind gets a plain root schema built from its
+      // definition so the worker needs no top-level $ref resolution. Nested
+      // $refs (inputs, reasoning, variants) resolve inside the same document.
+      const root = def => ({...def, definitions: schemaDoc.definitions, $schema: schemaDoc.$schema});
+      monaco.jsonDefaults?.setDiagnosticsOptions({
+        validate: true,
+        allowComments: false,
+        enableSchemaRequest: false,
+        schemaValidation: 'error',
+        schemas: [
+          {uri: schemaFileURI('#model'), fileMatch: ['model-edit/model'], schema: root(schemaDoc.definitions.model)},
+          {uri: schemaFileURI('#variant'), fileMatch: ['model-edit/variant'], schema: root(schemaDoc.definitions.variant)},
+        ],
+      });
+    });
+  }
+  return schemaLoad;
+}
+function schemaFileURI(fragment) {
+  return 'inmemory://llm-proxy/model.schema.json' + fragment;
+}
+function currentModelSlot(doc) {
+  if (tab !== 'models' || !doc || selectedProvider >= 0) return null;
+  const base = doc.models?.[selected];
+  if (!object(base)) return null;
+  if (selectedVariant >= 0) {
+    return Array.isArray(base.variants) && object(base.variants[selectedVariant]) ? {list: base.variants, index: selectedVariant, kind: 'variant'} : null;
+  }
+  return {list: doc.models, index: selected, kind: 'model'};
+}
+function routeNameOf(item, kind) {
+  if (!object(item)) return '';
+  return kind === 'variant' ? String(item.clientModelName || '') : String(item.clientModelName || item.providerModelName || '');
+}
+function openModelRoute() {
+  const slot = currentModelSlot(parsed());
+  return slot ? {name: routeNameOf(slot.list[slot.index], slot.kind), kind: slot.kind} : null;
+}
+function findRoute(doc, name) {
+  if (!name || !Array.isArray(doc?.models)) return null;
+  for (const [index, model] of doc.models.entries()) {
+    if (!object(model)) continue;
+    if (routeNameOf(model, 'model') === name) return {index, variant: -1};
+    if (Array.isArray(model.variants)) {
+      const variant = model.variants.findIndex(v => object(v) && routeNameOf(v, 'variant') === name);
+      if (variant >= 0) return {index, variant};
+    }
+  }
+  return null;
+}
+function syncJSONValue(item) {
+  if (!jsonModel || jsonModel.isDisposed()) return;
+  const pretty = JSON.stringify(item, null, 2) + '\n';
+  const current = jsonModel.getValue();
+  let same = current === pretty;
+  if (!same) {
+    try { same = canonicalJSON(current) === canonicalJSON(pretty); } catch { same = false; }
+  }
+  if (same) return;
+  jsonApplying = true;
+  try { jsonModel.setValue(pretty); } finally { jsonApplying = false; }
+  jsonAppliedText = pretty;
+  jsonInvalid = false;
+}
+// Typing reaches the model through the native input pipeline, which can apply
+// the tail of an input burst to the model without emitting further change
+// events, so change events alone are not a reliable signal that the content
+// has settled. The draft therefore converges to the editor through a periodic
+// poll that pushes the editor text into the draft slot only when it differs
+// from the last text this editor applied (jsonAppliedText keeps the direction
+// one-way: editor -> draft). flushJSONToDraft runs the same propagation
+// synchronously before anything can change which model slot is open.
+function onJSONContent() {
+  if (jsonApplying) return;
+  clearTimeout(jsonApplyTimer);
+  jsonApplyTimer = setTimeout(applyJSONToDraft, 180);
+}
+function applyJSONToDraft() {
+  clearTimeout(jsonApplyTimer);
+  jsonApplyTimer = null;
+  if (jsonApplying || !jsonModel || jsonModel.isDisposed() || !editJSON || tab !== 'models') return;
+  const editorText = jsonModel.getValue();
+  if (editorText === jsonAppliedText) return;
+  const doc = parsed();
+  const slot = currentModelSlot(doc);
+  if (!slot) return;
+  let value;
+  try { value = JSON.parse(editorText); } catch { jsonInvalid = true; return; }
+  if (!object(value)) { jsonInvalid = true; return; }
+  jsonInvalid = false;
+  jsonAppliedText = editorText;
+  jsonApplying = true;
+  try {
+    slot.list[slot.index] = value;
+    changeObject(doc);
+    renderList(doc);
+  } finally { jsonApplying = false; }
+}
+function flushJSONToDraft() {
+  if (jsonApplyTimer) applyJSONToDraft();
+}
+function openJSONEditor(doc, item, kind) {
+  loadMonaco().then(monaco => {
+    const slot = currentModelSlot(doc);
+    if (!slot || tab !== 'models' || !editJSON || !object(item)) return;
+    return loadModelSchema(monaco).then(() => {
+      if (!jsonEditor) {
+        jsonEditor = monaco.editor.create($('json-editor'), {
+          // Monaco's new native EditContext input pipeline can leave the text
+          // buffer inconsistent with the model's lines while typing; the
+          // classic textarea pipeline keeps getValue() reliable.
+          editContext: false,
+          automaticLayout: true,
+          minimap: {enabled: false},
+          scrollBeyondLastLine: false,
+          wordWrap: 'on',
+          fontSize: 13,
+          tabSize: 2,
+          renderLineHighlight: 'none',
+        });
+      }
+      const key = kind + ':' + selected + ':' + selectedVariant;
+      if (jsonModelKey !== key || !jsonModel || jsonModel.isDisposed() || jsonModel.uri.toString() !== modelEditURIPrefix + kind) {
+        jsonApplying = true;
+        try {
+          jsonModel?.dispose();
+          jsonModel = monaco.editor.createModel(JSON.stringify(item, null, 2) + '\n', 'json', monaco.Uri.parse(modelEditURIPrefix + kind));
+          jsonAppliedText = jsonModel.getValue();
+          jsonModel.onDidChangeContent(onJSONContent);
+          jsonEditor.setModel(jsonModel);
+        } finally { jsonApplying = false; }
+        jsonModelKey = key;
+        jsonInvalid = false;
+      } else {
+        syncJSONValue(item);
+      }
+      if (!jsonPoll) jsonPoll = setInterval(applyJSONToDraft, 400);
+      jsonEditor.layout();
+    });
+  }).catch(err => { message(err.message || 'Could not load the JSON editor.'); });
+}
 function renderPreview() {
   const preview = report?.previews?.[previewRunner];
   const name = previewRunner === 'dsh' ? 'DSH' : previewRunner === 'codex' ? 'Codex' : 'Grok';
@@ -76,11 +308,33 @@ function renderPreview() {
   const nav = $('preview-files');
   nav.hidden = files.length < 2;
   nav.replaceChildren(...files.map((file, index) => {
-    const el = button(file.name, () => { previewFileName = file.name; state(); });
+    const el = button(previewFileLabel(file), () => { previewFileName = file.name; state(); });
     el.setAttribute('aria-pressed', String(index === Math.min(previewFile, files.length - 1)));
     return el;
   }));
-  $('preview-content').textContent = preview?.error || selectedPreviewFile()?.content || (report ? 'Preview unavailable. Check diagnostics below.' : 'Validate the current draft to preview it.');
+  const file = selectedPreviewFile();
+  const compare = showCatalogDiff(preview, file);
+  const status = catalogStatus(file);
+  $('preview-status').hidden = !status;
+  $('preview-status').textContent = status;
+  $('preview-content').textContent = preview?.error || file?.content || (report ? 'Preview unavailable. Check diagnostics below.' : 'Validate the current draft to preview it.');
+  $('preview-content').hidden = compare;
+  $('preview-diff').hidden = !compare;
+  const token = ++diffToken;
+  if (compare) {
+    loadMonaco().then(monaco => {
+      if (token !== diffToken) return;
+      const current = selectedPreviewFile();
+      if (!showCatalogDiff(report?.previews?.[previewRunner], current)) return;
+      ensureCatalogDiff(monaco, current);
+    }).catch(err => {
+      if (token !== diffToken) return;
+      $('preview-diff').hidden = true;
+      $('preview-content').hidden = false;
+      $('preview-status').hidden = false;
+      $('preview-status').textContent = err.message || 'Could not load the diff editor.';
+    });
+  }
   renderCodexConfigWarnings(preview);
   updateCatalogInstall();
 }
@@ -142,8 +396,10 @@ function mayDiscardFields() {
 }
 async function load() {
   if ((text !== saved || fieldErrors.size) && !confirm('Reload from disk and discard unsaved changes?')) return;
+  clearTimeout(jsonApplyTimer); jsonApplyTimer = null;
   try {
     const value = await api(`config?mergeNative=${mergeNativeEnabled() ? 'true' : 'false'}`);
+    const urlState = parseEditorURL(location.search);
     clearTimeout(timer); generation++; fieldErrors.clear();
     text = saved = value.text; revision = value.revision;
     $('path').textContent = value.path;
@@ -151,7 +407,22 @@ async function load() {
     selected = 0;
     selectedVariant = selectedProvider = -1;
     collapsedProviders.clear(); expandedModels.clear();
-    if (!parsed()) tab = 'raw';
+    const doc = parsed();
+    if (!doc) tab = 'raw';
+    else {
+      // A ?model= deep link selects that base model or variant and expands its
+      // branch; a name that is no longer in the file keeps the first model and
+      // syncURL rewrites the address bar to it.
+      const entry = findRoute(doc, urlState.model);
+      if (entry) {
+        selected = entry.index;
+        selectedVariant = entry.variant;
+        expandedModels.add(entry.index);
+        const group = modelGroups(doc).find(g => g.models.some(m => m.index === entry.index));
+        if (group) collapsedProviders.delete(group.key);
+      }
+      editJSON = urlState.edit === 'json';
+    }
     render(); showReport(value.report); message('');
   } catch (err) { message(err.message); }
 }
@@ -294,18 +565,21 @@ function modelFields(parent, doc, model, variant = false) {
 }
 function selectModel(index, variant = -1) {
   if (!mayDiscardFields()) return;
+  flushJSONToDraft();
   selected = index; selectedVariant = variant; selectedProvider = -1;
   if (variant >= 0 && !$('search').value.trim()) expandedModels.add(index);
-  render();
+  render(); state();
 }
 function selectProvider(index) {
   if (!mayDiscardFields()) return;
+  flushJSONToDraft();
   selectedProvider = index; selectedVariant = -1;
   if (tab === 'providers') selected = index;
-  render();
+  render(); state();
 }
 function addModel(doc, providerName = '') {
   if (!mayDiscardFields()) return;
+  flushJSONToDraft();
   if (!Array.isArray(doc.models)) doc.models = [];
   const provider = (Array.isArray(doc.providers) ? doc.providers : []).find(p => object(p) && p.name === providerName);
   const protocol = provider?.kind === 'commandcode' ? 'anthropic-messages' : 'openai-responses';
@@ -318,14 +592,34 @@ function addModel(doc, providerName = '') {
 }
 function addVariant(doc, base) {
   if (!mayDiscardFields()) return;
+  flushJSONToDraft();
   if (!Array.isArray(base.variants)) base.variants = [];
   base.variants.push({clientModelName:(base.clientModelName || base.providerModelName || 'model') + '-variant'});
   selectedVariant = base.variants.length - 1;
   expandedModels.add(selected); $('search').value = '';
   changeObject(doc); render();
 }
-function renderForm(doc) {
+function modeToggle() {
+  const wrap = node('div', undefined, 'mode-toggle');
+  wrap.setAttribute('role', 'group');
+  wrap.setAttribute('aria-label', 'Editor mode');
+  const formButton = button('Form', () => {
+    if (!editJSON) return;
+    flushJSONToDraft();
+    if (jsonInvalid) { message('Fix the JSON errors before returning to the form. The draft still holds the last valid model.'); return; }
+    editJSON = false; render(); state();
+  });
+  const jsonButton = button('JSON', () => {
+    if (editJSON || !mayDiscardFields()) return;
+    editJSON = true; render(); state();
+  });
+  formButton.setAttribute('aria-pressed', String(!editJSON));
+  jsonButton.setAttribute('aria-pressed', String(editJSON));
+  wrap.append(formButton, jsonButton);
+  return wrap;
+}function renderForm(doc) {
   const form = $('form'); form.replaceChildren();
+  $('json-editor').hidden = true;
   if (!doc) { form.append(node('p','Use Raw JSON to repair the config before editing forms.')); return; }
   const providerView = tab === 'providers' || selectedProvider >= 0;
   const providerIndex = tab === 'providers' ? selected : selectedProvider;
@@ -345,8 +639,10 @@ function renderForm(doc) {
   }
   const heading = node('div',undefined,'actions');
   heading.append(node('h2', providerView ? item.name || 'New provider' : modelTitle(item, variantView ? 'Unnamed variant' : 'New model')));
+  if (!providerView) heading.append(modeToggle());
   heading.append(button(variantView ? 'Duplicate variant' : 'Duplicate',()=>{
     if(!mayDiscardFields())return;
+    flushJSONToDraft();
     list.push(structuredClone(item));
     if (providerView) { if(tab === 'providers') selected = list.length-1; else selectedProvider = list.length-1; }
     else if (variantView) selectedVariant = list.length-1;
@@ -355,6 +651,7 @@ function renderForm(doc) {
   }));
   heading.append(button(variantView ? 'Delete variant' : 'Delete',()=>{
     if(!confirm(variantView ? 'Delete this variant from the draft?' : 'Delete this entry from the draft?') || !mayDiscardFields())return;
+    flushJSONToDraft();
     list.splice(index,1);
     if (providerView) { selected = Math.max(0,index-1); selectedProvider = tab === 'models' && list.length ? selected : -1; }
     else if (variantView) selectedVariant = -1;
@@ -362,6 +659,13 @@ function renderForm(doc) {
     changeObject(doc); render();
   },'danger'));
   form.append(heading);
+  if (!providerView && editJSON) {
+    // JSON mode replaces the field grid with one editor over the whole model
+    // (or variant) object; the variant links are inside the JSON itself.
+    $('json-editor').hidden = false;
+    openJSONEditor(doc, item, variantView ? 'variant' : 'model');
+    return;
+  }
   if (providerView) {
     const fields=node('div',undefined,'fields');form.append(fields);
     field(fields,doc,item,'name','Provider name');field(fields,doc,item,'kind','Kind','text',['codex','commandcode','grok','http-proxy']);
@@ -450,9 +754,9 @@ function render() {
   if(tab==='models'||tab==='providers'){const doc=parsed();renderList(doc);renderForm(doc);}
   if(tab==='raw')$('raw').value=text;
 }
-document.querySelectorAll('[data-tab]').forEach(el=>el.onclick=()=>{if(!mayDiscardFields())return;tab=el.dataset.tab;selected=0;selectedVariant=selectedProvider=-1;$('search').value='';render();state();validate();});
+document.querySelectorAll('[data-tab]').forEach(el=>el.onclick=()=>{if(!mayDiscardFields())return;flushJSONToDraft();tab=el.dataset.tab;selected=0;selectedVariant=selectedProvider=-1;$('search').value='';render();state();validate();});
 $('add').onclick=()=>{
-  if(!mayDiscardFields())return;const doc=parsed();if(!doc){message('Repair the JSON first.');return;}
+  if(!mayDiscardFields())return;flushJSONToDraft();const doc=parsed();if(!doc){message('Repair the JSON first.');return;}
   if(tab==='models'){addModel(doc,selectedProvider>=0?doc.providers?.[selectedProvider]?.name || '':doc.models?.[selected]?.provider || '');return;}
   if(!Array.isArray(doc[tab]))doc[tab]=[];
   doc[tab].push(tab==='providers'?{name:'new-provider',kind:'codex',subscription:true}:{provider:'',protocol:'openai-responses',providerModelName:'new-model',reasoning:{disabled:true}});

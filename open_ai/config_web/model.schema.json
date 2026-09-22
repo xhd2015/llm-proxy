@@ -1,0 +1,215 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "llm-proxy model",
+  "description": "One model (or variant) object of the llm-proxy config. Fields not set here are validated by the proxy itself; the editor lint below the form reports the same problems.",
+  "definitions": {
+    "effort": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "xhigh", "max", "ultra"],
+      "description": "Supported reasoning effort."
+    },
+    "input": {
+      "type": "object",
+      "description": "One input modality.",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["text", "image"],
+          "description": "Supported input modality."
+        },
+        "disabled": {
+          "type": "boolean",
+          "description": "Advertise the modality to the client but reject requests that use it."
+        }
+      },
+      "additionalProperties": false,
+      "required": ["type"]
+    },
+    "reasoning": {
+      "type": "object",
+      "description": "Reasoning controls. disabled:true turns reasoning off; otherwise defaultEffort and effortsMapping are required.",
+      "properties": {
+        "disabled": {
+          "type": "boolean",
+          "description": "When true, reasoning is disabled and defaultEffort/effortsMapping must be omitted."
+        },
+        "defaultEffort": {
+          "$ref": "#/definitions/effort"
+        },
+        "effortsMapping": {
+          "type": "object",
+          "description": "Maps a client-requested effort to the upstream effort value; null passes the client effort through.",
+          "propertyNames": { "$ref": "#/definitions/effort" },
+          "additionalProperties": {
+            "type": ["string", "null"],
+            "enum": [null, "low", "medium", "high", "xhigh", "max", "ultra"]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "model": {
+      "type": "object",
+      "description": "A base model routed through one provider.",
+      "properties": {
+        "protocol": {
+          "type": "string",
+          "enum": ["openai-responses", "anthropic-messages"],
+          "description": "Upstream API protocol."
+        },
+        "provider": {
+          "type": "string",
+          "description": "Provider name from the providers list."
+        },
+        "providerModelName": {
+          "type": "string",
+          "description": "Model name sent to the provider."
+        },
+        "clientModelName": {
+          "type": "string",
+          "description": "Name clients use for this route; defaults to providerModelName."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Label shown in editors and pickers."
+        },
+        "protocolAdapter": {
+          "type": "string",
+          "enum": ["anthropic2openai"],
+          "description": "Bridges a client surface to the upstream protocol."
+        },
+        "baseInstructions": {
+          "type": "string",
+          "description": "System prompt sent with the request."
+        },
+        "inputs": {
+          "description": "Input modalities; null or omitted means text and image.",
+          "type": ["array", "null"],
+          "items": { "$ref": "#/definitions/input" }
+        },
+        "contextWindow": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "description": "Upstream context window in tokens."
+        },
+        "maxTokens": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "description": "Maximum output tokens."
+        },
+        "compat": {
+          "type": "object",
+          "description": "Compatibility flags, e.g. {\"stream_options\": false}.",
+          "additionalProperties": { "type": "boolean" }
+        },
+        "reasoning": {
+          "description": "Required on base models.",
+          "$ref": "#/definitions/reasoning"
+        },
+        "noImage": {
+          "type": "boolean",
+          "description": "Strip image parts before sending upstream."
+        },
+        "adjustUsageForDSH": {
+          "type": "boolean",
+          "description": "Adjust usage accounting for DSH clients."
+        },
+        "feedToGrokCli": {
+          "type": "boolean",
+          "description": "Enable Grok CLI stream filtering."
+        },
+        "effortMapping": {
+          "type": "object",
+          "description": "Maps client effort values to upstream effort values.",
+          "propertyNames": { "$ref": "#/definitions/effort" },
+          "additionalProperties": { "type": "string" }
+        },
+        "variants": {
+          "type": "array",
+          "description": "Variants of this model; each inherits every field it omits.",
+          "items": { "$ref": "#/definitions/variant" }
+        }
+      },
+      "additionalProperties": false,
+      "required": ["provider", "protocol", "providerModelName", "reasoning"]
+    },
+    "variant": {
+      "type": "object",
+      "description": "A variant of a base model; omitted fields inherit from the base.",
+      "properties": {
+        "clientModelName": {
+          "type": "string",
+          "description": "Name clients use for this route."
+        },
+        "agentRunners": {
+          "type": "array",
+          "description": "Agent runners that may use this variant; empty or omitted means all.",
+          "items": {
+            "type": "string",
+            "enum": ["dsh", "codex", "grok"]
+          },
+          "uniqueItems": true
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Label shown in editors and pickers."
+        },
+        "protocolAdapter": {
+          "type": "string",
+          "enum": ["anthropic2openai"],
+          "description": "Bridges a client surface to the upstream protocol."
+        },
+        "baseInstructions": {
+          "type": "string",
+          "description": "System prompt sent with the request."
+        },
+        "inputs": {
+          "description": "Input modalities; null or omitted inherits the base inputs.",
+          "type": ["array", "null"],
+          "items": { "$ref": "#/definitions/input" }
+        },
+        "contextWindow": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "description": "Upstream context window in tokens."
+        },
+        "maxTokens": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "description": "Maximum output tokens."
+        },
+        "compat": {
+          "type": "object",
+          "description": "Compatibility flags merged over the base flags.",
+          "additionalProperties": { "type": "boolean" }
+        },
+        "reasoning": {
+          "description": "Omitted or null inherits the base reasoning.",
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "#/definitions/reasoning" }
+          ]
+        },
+        "noImage": {
+          "type": "boolean",
+          "description": "Strip image parts before sending upstream."
+        },
+        "adjustUsageForDSH": {
+          "type": "boolean",
+          "description": "Adjust usage accounting for DSH clients."
+        },
+        "feedToGrokCli": {
+          "type": "boolean",
+          "description": "Enable Grok CLI stream filtering."
+        },
+        "effortMapping": {
+          "type": "object",
+          "description": "Maps client effort values to upstream effort values.",
+          "propertyNames": { "$ref": "#/definitions/effort" },
+          "additionalProperties": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
