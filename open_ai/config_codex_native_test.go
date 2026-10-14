@@ -438,6 +438,12 @@ func TestConfigWebCatalogInstallLifecycle(t *testing.T) {
 	orig := codexCatalogTargetPathFn
 	codexCatalogTargetPathFn = func() string { return filepath.Join(tempHome, ".codex", configModelsCatalogFileName) }
 	defer func() { codexCatalogTargetPathFn = orig }()
+	origDSH := configWebDSHSettingsPathFn
+	configWebDSHSettingsPathFn = func() string { return filepath.Join(tempHome, ".dsh", "settings.yaml") }
+	defer func() { configWebDSHSettingsPathFn = origDSH }()
+	origGrok := configWebGrokConfigPathFn
+	configWebGrokConfigPathFn = func() string { return filepath.Join(tempHome, ".grok", "config.toml") }
+	defer func() { configWebGrokConfigPathFn = origGrok }()
 	handler := webTestHandler(store)
 	targetPath := filepath.Join(tempHome, ".codex", configModelsCatalogFileName)
 
@@ -453,13 +459,22 @@ func TestConfigWebCatalogInstallLifecycle(t *testing.T) {
 		if err := json.Unmarshal(loaded.Body.Bytes(), &value); err != nil {
 			t.Fatal(err)
 		}
-		for _, preview := range value.Report.Previews {
+		// Only files with a known on-disk counterpart may carry target
+		// metadata: the Codex catalog (a whole file), the DSH settings block,
+		// and the Grok model run. The Codex TOML snippet has none, and a file
+		// must never advertise a target without a path to look at.
+		editable := map[string]bool{"llm-proxy-dsh.yaml": true, "llm-proxy-grok.toml": false}
+		for runner, preview := range value.Report.Previews {
 			for _, file := range preview.Files {
-				if file.Name == configModelsCatalogFileName {
-					continue
+				_, wantTarget := editable[file.Name]
+				want := file.Name == configModelsCatalogFileName || wantTarget
+				got := file.TargetPath != "" || file.TargetKind != "" || file.TargetState != "" || file.TargetContent != "" || file.TargetHash != "" || file.TargetChanges != 0
+				if got != want || want && file.TargetPath == "" || want && file.TargetState == "" {
+					t.Fatalf("%s/%s target metadata: got=%v want=%v %+v", runner, file.Name, got, want, file)
 				}
-				if file.TargetPath != "" || file.TargetState != "" || file.TargetContent != "" {
-					t.Fatalf("non-catalog preview carries install metadata: %+v", file)
+				// Save is offered only where writing is safe: the DSH block.
+				if wantTarget && file.TargetEditable != editable[file.Name] {
+					t.Fatalf("%s/%s targetEditable = %v, want %v", runner, file.Name, file.TargetEditable, editable[file.Name])
 				}
 			}
 		}

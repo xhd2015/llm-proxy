@@ -34,7 +34,11 @@ Edit the selected JSON config and preview DSH, Codex, and Grok exports in a loca
 The server binds to 127.0.0.1 on an automatic port. Ctrl+C stops it.
 No authentication is required; local processes can access the selected config.
 Save validates, checks for external changes, and backs up the old file.
-Neither the running proxy nor DSH settings are reloaded or modified.
+Runner settings change only when you edit the on-disk side of a preview diff and
+press Save; each Save backs the runner file up first and leaves the rest of it
+alone. A runner file that changed since the diff was loaded refuses the Save.
+The Grok preview compares against ~/.grok/config.toml but never writes it: those
+model tables are shared with other tools. The running proxy is not reloaded.
 
 Options:
   --config FILE  configuration file to edit (must exist)
@@ -114,9 +118,19 @@ type configWebFile struct {
 	Format        string `json:"format"`
 	Content       string `json:"content"`
 	TargetPath    string `json:"targetPath,omitempty"`
+	TargetKind    string `json:"targetKind,omitempty"`
+	TargetKey     string `json:"targetKey,omitempty"`
 	TargetState   string `json:"targetState,omitempty"`
 	TargetContent string `json:"targetContent,omitempty"`
-	Note          string `json:"note,omitempty"`
+	// TargetPreview is the generated export reduced to the same region as
+	// TargetContent, so both diff panes compare like with like.
+	TargetPreview string `json:"targetPreview,omitempty"`
+	TargetHash    string `json:"targetHash,omitempty"`
+	TargetChanges int    `json:"targetChanges,omitempty"`
+	// TargetEditable reports whether Save may write this target. A compare-only
+	// target (Grok) carries a path and content but is never written.
+	TargetEditable bool   `json:"targetEditable,omitempty"`
+	Note           string `json:"note,omitempty"`
 }
 
 type configWebPreview struct {
@@ -188,6 +202,25 @@ func inspectConfigWebDraft(text string, options configModelsOptions) configWebRe
 			} else {
 				preview.Content = content
 				preview.Files = []configWebFile{{Name: "llm-proxy-" + runner + "." + preview.Format, Format: preview.Format, Content: content}}
+				// These exports are regions of a runner file, not files, so the
+				// editor needs to know where the region lands and what it holds
+				// there before it can offer a diff. The DSH target is editable;
+				// the Grok one is compare-only because its [model.*] tables are
+				// shared with other tools.
+				if target, ok := previewSyncTargetFor(runner, preview.Files[0].Name); ok {
+					file := &preview.Files[0]
+					state, region, hash, note, changes := syncTargetPreviewUpdate(target, content)
+					file.TargetKind = configWebTargetFragment
+					file.TargetPath = target.Path
+					file.TargetKey = target.Key
+					file.TargetState = state
+					file.TargetContent = region
+					file.TargetPreview = target.previewRegion(content)
+					file.TargetHash = hash
+					file.TargetChanges = changes
+					file.TargetEditable = target.Editable
+					file.Note = note
+				}
 			}
 			report.Previews[runner] = preview
 		}
@@ -244,7 +277,7 @@ func newConfigWebHandlerWithNative(store *configWebStore, host string, native *n
 			writeConfigWebJSON(w, 200, map[string]any{"text": text, "revision": revision, "path": store.path, "report": inspectConfigWebDraft(text, options)})
 			return
 		}
-		if r.URL.Path != "/api/validate" && r.URL.Path != "/api/save" && r.URL.Path != "/api/catalog" {
+		if r.URL.Path != "/api/validate" && r.URL.Path != "/api/save" && r.URL.Path != "/api/catalog" && r.URL.Path != "/api/diff" && r.URL.Path != "/api/sync" {
 			http.NotFound(w, r)
 			return
 		}
@@ -260,6 +293,11 @@ func newConfigWebHandlerWithNative(store *configWebStore, host string, native *n
 			Text        string `json:"text"`
 			Revision    string `json:"revision"`
 			MergeNative *bool  `json:"mergeNative"`
+			Runner      string `json:"runner"`
+			File        string `json:"file"`
+			Hash        string `json:"hash"`
+			Region      string `json:"region"`
+			DryRun      bool   `json:"dryRun"`
 		}
 		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, configWebMaxBytes*2))
 		decoder.DisallowUnknownFields()
@@ -302,6 +340,51 @@ func newConfigWebHandlerWithNative(store *configWebStore, host string, native *n
 			writeConfigWebJSON(w, 200, map[string]any{"path": targetPath, "result": result})
 			return
 		}
+		if r.URL.Path == "/api/diff" || r.URL.Path == "/api/sync" {
+			runner := draft.Runner
+			if runner == "" {
+				runner = "dsh"
+			}
+			file, found := previewReportFile(report, runner, draft.File)
+			if !found || file.TargetKind != configWebTargetFragment || file.TargetPath == "" {
+				http.Error(w, "no editable sync target for "+draft.File, http.StatusNotFound)
+				return
+			}
+			target, ok := previewSyncTargetFor(runner, draft.File)
+			if !ok || !target.Editable {
+				http.Error(w, "no editable sync target for "+draft.File, http.StatusNotFound)
+				return
+			}
+			preview := target.previewRegion(report.Previews[runner].Content)
+			if r.URL.Path == "/api/diff" {
+				// The left pane is the preview and the right pane is the file, so
+				// the reader edits the side that Save writes back.
+				writeConfigWebJSON(w, 200, map[string]any{"file": draft.File, "target": file, "preview": preview, "disk": file.TargetContent})
+				return
+			}
+			if draft.Hash != file.TargetHash {
+				http.Error(w, errConfigWebChanged.Error(), http.StatusConflict)
+				return
+			}
+			result, backup, content, err := saveConfigWebFragment(target, preview, draft.Hash, draft.Region, draft.DryRun)
+			if err != nil {
+				status := 500
+				switch {
+				case errors.Is(err, errConfigWebChanged), errors.Is(err, errConfigWebLocked), errors.Is(err, errConfigWebNoRunnerHome):
+					status = 409
+				case errors.Is(err, errConfigWebUnparsable), errors.Is(err, errConfigWebEmptyRegion):
+					status = 422
+				}
+				http.Error(w, err.Error(), status)
+				return
+			}
+			response := map[string]any{"path": target.Path, "result": result, "backup": backup}
+			if draft.DryRun {
+				response["content"] = content
+			}
+			writeConfigWebJSON(w, 200, response)
+			return
+		}
 		revision, backup, err := store.save(draft.Text, draft.Revision)
 		if err != nil {
 			status := 500
@@ -319,6 +402,17 @@ func writeConfigWebJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+// previewReportFile finds the named file of a runner preview; a named file is
+// the only way to select which export a diff or sync applies to.
+func previewReportFile(report configWebReport, runner, name string) (configWebFile, bool) {
+	for _, file := range report.Previews[runner].Files {
+		if file.Name == name {
+			return file, true
+		}
+	}
+	return configWebFile{}, false
 }
 
 // queryMergeNative parses the GET /api/config merge flag; absent or
@@ -369,7 +463,7 @@ func codexCatalogTarget(targetPath, generated string) (state, content, note stri
 
 func configWebAssetAllowed(path string) bool {
 	switch path {
-	case "/", "/app.js", "/tree.mjs", "/url-state.mjs", "/style.css", "/model.schema.json":
+	case "/", "/app.js", "/tree.mjs", "/url-state.mjs", "/model-run.mjs", "/style.css", "/model.schema.json":
 		return true
 	}
 	if !strings.HasPrefix(path, "/vs/") || strings.HasSuffix(path, "/") || strings.Contains(path, "..") || strings.Contains(path, `\`) {

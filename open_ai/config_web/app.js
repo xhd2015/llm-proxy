@@ -1,5 +1,6 @@
 import {modelGroups, filterModelGroups, modelTitle} from './tree.mjs';
 import {parseEditorURL, editorSearch, previewFileIndex} from './url-state.mjs';
+import {modelRunSummary, modelRunNotice} from './model-run.mjs';
 
 const $ = (id) => document.getElementById(id);
 const initialUI = parseEditorURL(location.search);
@@ -40,7 +41,7 @@ function state() {
 function syncURL() {
   const file = tab === 'preview' ? (selectedPreviewFile()?.name || previewFileName) : '';
   const open = tab === 'models' ? openModelRoute() : null;
-  const search = editorSearch({tab, runner: previewRunner, file, model: open?.name || '', edit: editJSON && tab === 'models' ? 'json' : ''});
+  const search = editorSearch({tab, runner: previewRunner, file, model: open?.name || '', edit: editJSON && tab === 'models' ? 'json' : '', diff: tab === 'preview' && syncOpen ? '1' : ''});
   const next = location.pathname + search + location.hash;
   if (next !== location.pathname + location.search + location.hash) history.replaceState(null, '', next);
 }
@@ -84,8 +85,189 @@ function catalogStatus(file) {
   if (file.targetState === 'differ' && file.note) return file.note;
   return '';
 }
+
+// Editable diff state for fragment targets (the DSH settings block). The left
+// pane is the preview; the right pane is the runner file and is editable, so
+// Save writes exactly what the reader sees there. The submitted text is
+// re-derived from the runner file by the server: the client never names a path.
+let syncOpen = initialUI.diff === '1', syncData = null, syncToken = 0, syncPending = false;
+let syncDirty = false, syncConflict = '';
+const isFragmentFile = (file) => file?.targetKind === 'fragment';
+// A compare-only target (Grok) has a located region but no Save: its [model.*]
+// tables are shared with other tools, and the same model id can point at a
+// different proxy in the file than in the export.
+const isCompareOnly = (file) => isFragmentFile(file) && !file.targetEditable;
+// syncWritable reports whether the editor may save this file, which is what
+// decides if /api/diff (and so the editable panes) apply at all.
+const syncWritable = (file) => isFragmentFile(file) && !!file.targetEditable;
+function showFragmentDiff(file) {
+  return syncOpen && tab === 'preview' && syncWritable(file) && !!syncData;
+}
+// showReadOnlyDiff renders both panes from the report: no /api/diff round trip
+// and no hash, because nothing on this target can be written.
+function showReadOnlyDiff(file) {
+  return syncOpen && tab === 'preview' && isCompareOnly(file) && typeof file.targetContent === 'string';
+}
+// compareStatus explains a compare-only diff, leading with the shared keys that
+// differ: that is the decision the reader actually has to make.
+function compareStatus(file, preview) {
+  if (!isCompareOnly(file)) return '';
+  if (file.targetState === 'unreadable') return file.note || `Could not read ${file.targetPath}.`;
+  if (file.targetState === 'missing') return file.note || `No [model.*] tables in ${file.targetPath}.`;
+  const summary = modelRunSummary(file.targetPreview || preview, file.targetContent);
+  const notice = `${modelRunNotice(summary)} · ${file.targetPath}`;
+  if (!summary.different.length) return notice;
+  return `${notice}\nshared keys differ: ${summary.different.join(', ')} — your file points these at another proxy, so this comparison is read-only.`;
+}
+function fragmentStatus(file) {
+  if (!isFragmentFile(file) || isCompareOnly(file)) return '';
+  if (file.targetState === 'unreadable') return file.note || `Could not read ${file.targetPath}.`;
+  if (file.targetState === 'missing') return `Not in ${file.targetPath} yet; saving adds the block.`;
+  if (file.targetState === 'same') return `Up to date with ${file.targetPath}.`;
+  const count = file.targetChanges || 0;
+  return `${count} ${count === 1 ? 'line differs' : 'lines differ'} from ${file.targetPath}.`;
+}
+// reduceBlock mirrors the server's block location so Save can say up front what
+// will be written: the server only ever splices the owned block, so text the
+// reader adds outside it cannot be saved and must not vanish silently.
+function reduceBlock(text, key) {
+  const lines = String(text || '').split('\n');
+  let start = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i] === key + ':' || lines[i].startsWith(key + ': ') || lines[i].startsWith(key + ':\t')) {
+      start = i;
+      break;
+    }
+  }
+  if (start < 0) return {block: '', outside: 0};
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (line !== '' && line[0] !== ' ' && line[0] !== '\t' && line[0] !== '#') {
+      end = i;
+      break;
+    }
+  }
+  let last = end - 1;
+  while (last > start && lines[last].trim() === '') last--;
+  const dropped = lines.slice(start, last + 1).length;
+  const outside = lines.slice(0, start).filter(line => line.trim() !== '').length
+    + lines.slice(last + 1).filter(line => line.trim() !== '').length;
+  return {block: lines.slice(start, last + 1).join('\n') + '\n', outside, dropped};
+}
+
+// The pane the reader can edit: the Monaco model, or the textarea fallback when
+// the editor bundle is unavailable.
+function syncPaneValue() {
+  if (syncData && diffEditor) return diffModified.getValue();
+  return $('disk-text').value;
+}
+function syncSetDirty(value) {
+  syncDirty = !!syncData && value !== (syncData.disk || '');
+}
+function syncRefresh(prompt) {
+  const file = selectedPreviewFile();
+  if (!syncOpen || !syncWritable(file)) {
+    syncData = null;
+    syncConflict = '';
+    syncDirty = false;
+    renderSyncPane();
+    return;
+  }
+  if (syncDirty && prompt && !confirm('Discard the edits in the on-disk pane and reload the file?')) return;
+  const token = ++syncToken;
+  syncPending = true;
+  renderSyncPane();
+  api('diff', {text, runner: previewRunner, file: file.name, mergeNative: mergeNativeEnabled()}).then(value => {
+    if (token !== syncToken) return;
+    syncData = value;
+    syncPending = false;
+    syncConflict = '';
+    syncDirty = false;
+    if (diffEditor) {
+      if (diffOriginal.getValue() !== (value.preview || '')) diffOriginal.setValue(value.preview || '');
+      diffModified.setValue(value.disk || '');
+    }
+    $('disk-text').value = value.disk || '';
+    state();
+  }).catch(err => {
+    if (token !== syncToken) return;
+    syncData = null;
+    syncPending = false;
+    message(err.message);
+    state();
+  });
+}
+// renderSyncPane shows the label strip and keeps Save honest: enabled only when
+// the pane differs from the file that was loaded and no conflict is pending.
+function renderSyncPane() {
+  const file = selectedPreviewFile();
+  const strip = $('pane-strip');
+  const show = tab === 'preview' && isFragmentFile(file) && syncOpen;
+  if (!show) {
+    strip.hidden = true;
+    return;
+  }
+  strip.hidden = !!$('preview-diff').hidden && !!$('disk-text').hidden;
+  const writable = syncWritable(file);
+  $('pane-actions').hidden = !writable;
+  $('pane-target').textContent = writable
+    ? `${file.targetPath} · editable — only the ${file.targetKey} block is saved`
+    : `${file.targetPath} · read-only — shared with other tools`;
+  if (!writable) return;
+  $('sync-save').disabled = busy || !syncDirty || !!syncConflict;
+  $('sync-save').textContent = syncConflict ? 'Save blocked' : 'Save';
+  $('sync-reload').disabled = busy || syncPending;
+}
+async function syncSave() {
+  const file = selectedPreviewFile();
+  if (busy || !isFragmentFile(file) || !syncData || syncConflict) return;
+  const region = syncPaneValue();
+  const reduced = reduceBlock(region, file.targetKey);
+  if (reduced.outside > 0) {
+    message(`Only the ${file.targetKey} block is saved; ${reduced.outside} line(s) outside it will be ignored.`);
+  }
+  if (reduced.block === (syncData.disk || '')) {
+    if (!reduced.outside) message('No file changes.');
+    return;
+  }
+  busy = true;
+  state();
+  try {
+    const value = await api('sync', {text, runner: previewRunner, file: file.name, mergeNative: mergeNativeEnabled(), hash: syncData.target?.targetHash || '', region});
+    syncDirty = false;
+    message(value.result === 'unchanged'
+      ? 'No file changes.'
+      : `Saved ${value.path}` + (value.backup ? `\nBackup: ${value.backup}` : '') + `\n${previewRunner.toUpperCase()} reloads its settings without a restart.`);
+    await validate();
+    syncRefresh(false);
+  } catch (err) {
+    // A stale revision means someone else wrote the file: block Save and tell
+    // the reader to reload rather than overwriting their change.
+    if (/changed on disk/.test(err.message)) {
+      syncConflict = err.message;
+      message(`${err.message}\nReload the file to continue; the edits in this pane will be discarded.`);
+    } else {
+      message(err.message);
+    }
+  } finally {
+    busy = false;
+    state();
+  }
+}
+// mayDiscardSync guards every way out of the pane that would lose edits.
+function mayDiscardSync() {
+  if (!syncDirty) return true;
+  return confirm('Discard the unsaved edits in the on-disk pane?');
+}
+$('sync-save').onclick = syncSave;
+$('sync-reload').onclick = () => syncRefresh(true);
+$('disk-text').oninput = () => {
+  syncSetDirty($('disk-text').value);
+  renderSyncPane();
+};
 const previewSideBySide = window.matchMedia('(min-width: 761px)');
-let diffEditor, diffOriginal, diffModified, diffToken = 0, monacoLoad;
+let diffEditor, diffOriginal, diffModified, diffLanguage = '', diffToken = 0, monacoLoad;
 previewSideBySide.addEventListener('change', () => {
   diffEditor?.updateOptions({ renderSideBySide: previewSideBySide.matches });
 });
@@ -107,28 +289,70 @@ function loadMonaco() {
   }
   return monacoLoad;
 }
-function ensureCatalogDiff(monaco, file) {
-  const originalText = file.targetState === 'missing' ? '' : file.targetContent;
-  const modifiedText = file.content || '';
+// The vendored bundle registers yaml but has no toml tokenizer, so TOML panes
+// stay plain text rather than being mislabelled as another language.
+function diffLanguageFor(format) {
+  if (format === 'yaml') return 'yaml';
+  if (format === 'json') return 'json';
+  return 'plaintext';
+}
+// ensureDiffEditor points the shared diff editor at two texts. The native
+// revert affordances stay off: this editor is a reader, and a block is applied
+// through the picker so the server, not the pane, decides the written bytes.
+// ensureDiffEditor points the shared diff editor at the two panes. The original
+// (left) side is the read-only preview; the modified (right) side is the runner
+// file and is editable, so Save can write back what the reader sees. The native
+// revert icons stay off: this build renders none for a read-only original, and
+// an editable right pane would otherwise offer a revert gesture whose direction
+// contradicts Save.
+function ensureDiffEditor(monaco, originalText, modifiedText, language, editable) {
+  if (diffEditor && diffLanguage !== language) {
+    diffEditor.dispose();
+    diffEditor = null;
+    diffOriginal?.dispose();
+    diffModified?.dispose();
+    diffOriginal = diffModified = null;
+  }
   if (!diffEditor) {
     diffEditor = monaco.editor.createDiffEditor($('preview-diff'), {
-      readOnly: true,
+      readOnly: !editable,
       originalEditable: false,
+      renderMarginRevertIcon: false,
+      renderGutterMenu: false,
+      // Keep the panes truly side by side: the labels claim left/right, and
+      // Monaco would otherwise switch to the inline view at its 900px default.
+      useInlineViewWhenSpaceIsLimited: false,
       renderSideBySide: previewSideBySide.matches,
+      originalAriaLabel: 'Preview, generated from the config, read-only',
+      modifiedAriaLabel: editable ? 'On-disk runner file, editable' : 'On-disk runner file, read-only',
       automaticLayout: true,
       scrollBeyondLastLine: false,
       minimap: { enabled: false },
       wordWrap: 'on',
     });
-    diffOriginal = monaco.editor.createModel(originalText, 'json');
-    diffModified = monaco.editor.createModel(modifiedText, 'json');
+    diffOriginal = monaco.editor.createModel(originalText, language);
+    diffModified = monaco.editor.createModel(modifiedText, language);
     diffEditor.setModel({ original: diffOriginal, modified: diffModified });
+    // Editing the right pane is the whole point: track it for Save and for the
+    // unsaved-changes guards.
+    diffModified.onDidChangeContent(() => {
+      syncSetDirty(diffModified.getValue());
+      renderSyncPane();
+    });
+    diffLanguage = language;
   } else {
     if (diffOriginal.getValue() !== originalText) diffOriginal.setValue(originalText);
     if (diffModified.getValue() !== modifiedText) diffModified.setValue(modifiedText);
-    diffEditor.updateOptions({ renderSideBySide: previewSideBySide.matches });
+    diffEditor.updateOptions({ renderSideBySide: previewSideBySide.matches, readOnly: !editable });
   }
   diffEditor.layout();
+}
+function ensureCatalogDiff(monaco, file) {
+  // Left is the installed catalog, right is the generated one. Read-only: this
+  // file installs through its own Create/Update flow, not through Save.
+  const originalText = file.targetState === 'missing' ? '' : file.targetContent;
+  const modifiedText = file.content || '';
+  ensureDiffEditor(monaco, originalText, modifiedText, diffLanguageFor(file.format), false);
 }
 
 // The model JSON editor edits exactly one model or variant object. Its Monaco
@@ -308,32 +532,84 @@ function renderPreview() {
   const nav = $('preview-files');
   nav.hidden = files.length < 2;
   nav.replaceChildren(...files.map((file, index) => {
-    const el = button(previewFileLabel(file), () => { previewFileName = file.name; state(); });
+    const el = button(previewFileLabel(file), () => {
+      if (!mayDiscardSync()) return;
+      previewFileName = file.name;
+      syncData = null;
+      syncDirty = false;
+      state();
+      if (syncOpen) syncRefresh(false);
+    });
     el.setAttribute('aria-pressed', String(index === Math.min(previewFile, files.length - 1)));
     return el;
   }));
   const file = selectedPreviewFile();
-  const compare = showCatalogDiff(preview, file);
-  const status = catalogStatus(file);
+  const catalogCompare = showCatalogDiff(preview, file);
+  const readOnlyCompare = showReadOnlyDiff(file);
+  const fragmentCompare = showFragmentDiff(file);
+  const compare = catalogCompare || readOnlyCompare || fragmentCompare;
+  // The Diff button belongs to files the editor knows how to sync into a
+  // runner file; the Codex catalog keeps its own Create/Update flow.
+  const diffButton = $('diff');
+  diffButton.hidden = tab !== 'preview' || !isFragmentFile(file);
+  diffButton.textContent = file?.targetChanges ? `Diff · ${file.targetChanges}` : 'Diff';
+  diffButton.setAttribute('aria-pressed', String(syncOpen));
+  const status = catalogStatus(file) || compareStatus(file, preview?.content || '') || fragmentStatus(file);
   $('preview-status').hidden = !status;
   $('preview-status').textContent = status;
   $('preview-content').textContent = preview?.error || file?.content || (report ? 'Preview unavailable. Check diagnostics below.' : 'Validate the current draft to preview it.');
   $('preview-content').hidden = compare;
   $('preview-diff').hidden = !compare;
+  $('disk-text').hidden = true;
+  renderSyncPane();
   const token = ++diffToken;
   if (compare) {
+    // Without the editor bundle the right pane still has to be editable, so the
+    // on-disk text falls back to a plain textarea and Save keeps working.
+    const finish = (err) => {
+      if (token !== diffToken) return;
+      if (catalogCompare) {
+        $('preview-diff').hidden = true;
+        $('preview-content').hidden = false;
+        $('preview-status').hidden = false;
+        $('preview-status').textContent = err.message || 'Could not load the diff editor.';
+        return;
+      }
+      $('preview-diff').hidden = true;
+      const area = $('disk-text');
+      const current = selectedPreviewFile();
+      const writable = syncWritable(current);
+      area.readOnly = !writable;
+      area.value = writable ? (syncData?.disk || '') : (current?.targetContent || '');
+      area.hidden = false;
+      $('preview-status').hidden = false;
+      $('preview-status').textContent = (err.message || 'Could not load the diff editor.')
+        + (writable ? ' Edit the on-disk text below; Save still works.' : ' Showing the on-disk side only; this comparison is read-only.');
+      renderSyncPane();
+    };
     loadMonaco().then(monaco => {
       if (token !== diffToken) return;
-      const current = selectedPreviewFile();
-      if (!showCatalogDiff(report?.previews?.[previewRunner], current)) return;
-      ensureCatalogDiff(monaco, current);
-    }).catch(err => {
-      if (token !== diffToken) return;
-      $('preview-diff').hidden = true;
-      $('preview-content').hidden = false;
-      $('preview-status').hidden = false;
-      $('preview-status').textContent = err.message || 'Could not load the diff editor.';
-    });
+      if (catalogCompare) {
+        const current = selectedPreviewFile();
+        if (!showCatalogDiff(report?.previews?.[previewRunner], current)) return;
+        ensureCatalogDiff(monaco, current);
+        return;
+      }
+      // A compare-only target renders both panes from the report; nothing here
+      // can be saved, so neither side is editable.
+      if (readOnlyCompare) {
+        const current = selectedPreviewFile();
+        ensureDiffEditor(monaco, current?.targetPreview || '', current?.targetContent || '', diffLanguageFor(current?.format), false);
+        renderSyncPane();
+        return;
+      }
+      // Fragment panes come from /api/diff: the server reduced both sides to the
+      // one block, so the reader edits the file's own lines on the right.
+      if (!syncData) return;
+      ensureDiffEditor(monaco, syncData.preview || '', syncData.disk || '', diffLanguageFor(selectedPreviewFile()?.format), true);
+      syncSetDirty(diffModified.getValue());
+      renderSyncPane();
+    }).catch(finish);
   }
   renderCodexConfigWarnings(preview);
   updateCatalogInstall();
@@ -356,7 +632,15 @@ function updateCatalogInstall() {
   install.textContent = file.targetState === 'missing' ? 'Create' : file.targetState === 'same' ? 'Updated' : 'Update';
   install.disabled = file.targetState === 'same';
 }
-document.querySelectorAll('[data-runner]').forEach(el => el.onclick = () => { previewRunner = el.dataset.runner; previewFileName = ''; state(); });
+document.querySelectorAll('[data-runner]').forEach(el => el.onclick = () => {
+  if (!mayDiscardSync()) return;
+  previewRunner = el.dataset.runner;
+  previewFileName = '';
+  syncData = null;
+  syncDirty = false;
+  state();
+  if (syncOpen) syncRefresh(false);
+});
 $('merge-native').checked = mergeNativeEnabled();
 $('merge-native').onchange = () => {
   try { localStorage.setItem(mergeNativeStorageKey, $('merge-native').checked ? '1' : '0'); } catch {}
@@ -370,6 +654,13 @@ function showReport(value) {
   for (const d of all) $('diagnostics').append(node('li', `${d.severity === 'error' ? 'Error' : 'Warning'}: ${d.path}: ${d.message}`, d.severity));
   if (!all.length) $('diagnostics').append(node('li', 'Config valid.'));
   state();
+  // An open pane follows the draft: a right side rendered against older text
+  // would offer a Save the reader did not review. A compare-only diff renders
+  // from the report, so it only needs a re-render.
+  if (syncOpen) {
+    if (syncWritable(selectedPreviewFile())) syncRefresh(false);
+    else renderPreview();
+  }
 }
 async function validate() {
   clearTimeout(timer);
@@ -422,6 +713,7 @@ async function load() {
         if (group) collapsedProviders.delete(group.key);
       }
       editJSON = urlState.edit === 'json';
+      syncOpen = urlState.diff === '1';
     }
     render(); showReport(value.report); message('');
   } catch (err) { message(err.message); }
@@ -754,7 +1046,7 @@ function render() {
   if(tab==='models'||tab==='providers'){const doc=parsed();renderList(doc);renderForm(doc);}
   if(tab==='raw')$('raw').value=text;
 }
-document.querySelectorAll('[data-tab]').forEach(el=>el.onclick=()=>{if(!mayDiscardFields())return;flushJSONToDraft();tab=el.dataset.tab;selected=0;selectedVariant=selectedProvider=-1;$('search').value='';render();state();validate();});
+document.querySelectorAll('[data-tab]').forEach(el=>el.onclick=()=>{if(!mayDiscardFields()||!mayDiscardSync())return;flushJSONToDraft();tab=el.dataset.tab;selected=0;selectedVariant=selectedProvider=-1;$('search').value='';render();state();validate();});
 $('add').onclick=()=>{
   if(!mayDiscardFields())return;flushJSONToDraft();const doc=parsed();if(!doc){message('Repair the JSON first.');return;}
   if(tab==='models'){addModel(doc,selectedProvider>=0?doc.providers?.[selectedProvider]?.name || '':doc.models?.[selected]?.provider || '');return;}
@@ -765,6 +1057,15 @@ $('add').onclick=()=>{
 $('search').oninput=()=>renderList(parsed());
 $('raw').oninput=()=>{text=$('raw').value;selected=0;selectedVariant=selectedProvider=-1;expandedModels.clear();changed();};
 $('reload').onclick=load;$('validate').onclick=validate;$('save').onclick=save;
+$('diff').onclick=()=>{
+  if(syncOpen&&!mayDiscardSync())return;
+  syncOpen=!syncOpen;
+  syncData=null;
+  syncDirty=false;
+  // A compare-only target renders both panes from the report, so it needs no
+  // /api/diff round trip.
+  if(syncOpen&&syncWritable(selectedPreviewFile()))syncRefresh(false);else state();
+};
 $('copy').onclick=async()=>{try{await navigator.clipboard.writeText(selectedPreviewFile().content);message('Preview copied.');}catch(err){message(err.message);}};
 $('catalog-install').onclick=async()=>{
   if (busy) return;
@@ -778,5 +1079,5 @@ $('catalog-install').onclick=async()=>{
   finally { busy = false; state(); }
 };
 $('download').onclick=()=>{const file=selectedPreviewFile();const mime=file.format==='yaml'?'text/yaml':file.format==='json'?'application/json':'application/toml';const url=URL.createObjectURL(new Blob([file.content],{type:mime}));const link=node('a');link.href=url;link.download=file.name;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
-window.addEventListener('beforeunload',event=>{if(text!==saved||fieldErrors.size){event.preventDefault();event.returnValue='';}});
+window.addEventListener('beforeunload',event=>{if(text!==saved||fieldErrors.size||syncDirty){event.preventDefault();event.returnValue='';}});
 load();

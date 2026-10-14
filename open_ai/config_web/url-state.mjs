@@ -9,10 +9,11 @@ export function parseEditorURL(search) {
   const file = params.get('file') || '';
   const model = params.get('model') || '';
   const edit = params.get('edit') === 'json' ? 'json' : '';
-  return {tab, runner, file, model, edit};
+  const diff = params.get('diff') === '1' ? '1' : '';
+  return {tab, runner, file, model, edit, diff};
 }
 
-export function editorSearch({tab = 'models', runner = 'dsh', file = '', model = '', edit = ''} = {}) {
+export function editorSearch({tab = 'models', runner = 'dsh', file = '', model = '', edit = '', diff = ''} = {}) {
   const params = new URLSearchParams();
   if (tab && tab !== 'models') params.set('tab', tab);
   if (tab === 'models') {
@@ -22,6 +23,7 @@ export function editorSearch({tab = 'models', runner = 'dsh', file = '', model =
   if (tab === 'preview') {
     if (runner && runner !== 'dsh') params.set('runner', runner);
     if (file) params.set('file', file);
+    if (diff === '1') params.set('diff', '1');
   }
   const encoded = params.toString();
   return encoded ? '?' + encoded : '';
