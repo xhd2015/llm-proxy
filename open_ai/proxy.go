@@ -127,8 +127,11 @@ func (c *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 
 	c.logRequest(req, body)
-	c.modifyRequestBody(req, body)
+	sentBody := c.modifyRequestBody(req, body)
 	c.injectCodexAuth(req)
+	// Known before the response arrives: Codex requests are sent with stream:true.
+	// The response is forwarded live from that fact, not by sniffing the body.
+	streamed := c.codexTransform && jsonStreamEnabled(sentBody)
 
 	resp, err := c.transport().RoundTrip(req)
 	if err != nil {
@@ -139,6 +142,10 @@ func (c *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	c.maybeLogWebSocket(req, resp)
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if streamed {
+			c.streamCodexResponse(resp)
+			return resp, nil
+		}
 		return c.handleSuccessResponse(resp, req)
 	}
 	if resp.StatusCode >= 300 {
@@ -175,14 +182,14 @@ func (c *loggingTransport) logRequest(req *http.Request, body []byte) {
 // modifyRequestBody applies Codex request adaptation and model remapping to
 // JSON POST bodies. The body is re-marshaled only when something changed, so
 // requests that are not modified are forwarded byte-for-byte.
-func (c *loggingTransport) modifyRequestBody(req *http.Request, body []byte) {
+func (c *loggingTransport) modifyRequestBody(req *http.Request, body []byte) []byte {
 	contentType := req.Header.Get("Content-Type")
 	if req.Method != "POST" || !isJSONContentType(contentType) {
-		return
+		return body
 	}
 	var data map[string]interface{}
 	if err := json.Unmarshal(body, &data); err != nil {
-		return
+		return body
 	}
 	changed := false
 	if c.codexTransform {
@@ -201,14 +208,26 @@ func (c *loggingTransport) modifyRequestBody(req *http.Request, body []byte) {
 		}
 	}
 	if !changed {
-		return
+		return body
 	}
 	modifiedBody, err := json.Marshal(data)
 	if err != nil {
-		return
+		return body
 	}
 	req.Body = io.NopCloser(bytes.NewBuffer(modifiedBody))
 	req.ContentLength = int64(len(modifiedBody))
+	return modifiedBody
+}
+
+// jsonStreamEnabled reports whether a JSON request asked for a streamed response.
+func jsonStreamEnabled(body []byte) bool {
+	var data struct {
+		Stream bool `json:"stream"`
+	}
+	if err := json.Unmarshal(body, &data); err != nil {
+		return false
+	}
+	return data.Stream
 }
 
 // injectCodexAuth overrides the Authorization header with the ChatGPT OAuth
@@ -290,9 +309,9 @@ func (c *loggingTransport) handleStreamingResponse(resp *http.Response) {
 	replaceBody(resp, respBody)
 }
 
-// handleNonStreamingResponse buffers a non-SSE response to extract usage and,
-// for the Codex backend, fix responses that carry an SSE body with a
-// text/plain content type.
+// handleNonStreamingResponse buffers a response that was not requested with
+// stream:true, so usage can be extracted. Streamed Codex responses do not use
+// this path: they are forwarded live by streamCodexResponse.
 func (c *loggingTransport) handleNonStreamingResponse(resp *http.Response) (*http.Response, error) {
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {

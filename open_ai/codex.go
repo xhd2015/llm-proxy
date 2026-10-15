@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
@@ -252,12 +253,104 @@ func isValidReasoningEffort(s string) bool {
 // read output from the completed event to see no results and retry
 // indefinitely.
 func patchCodexSSEOutput(body []byte) []byte {
-	lines := strings.Split(string(body), "\n")
-
-	// Collect output items in order from response.output_item.done events.
 	var outputItems []json.RawMessage
-	for _, line := range lines {
-		jsonData, ok := parseSSEData(line)
+	collectCodexOutputItems(body, &outputItems)
+	if len(outputItems) == 0 {
+		return body
+	}
+	return patchCodexEvent(body, outputItems)
+}
+
+// streamCodexResponse forwards a streamed Codex response as upstream sends it.
+// The request already has stream:true, so this does not sniff the body or change
+// Content-Type. Holding the body until EOF made clients idle-timeout.
+func (c *loggingTransport) streamCodexResponse(resp *http.Response) {
+	upstream := resp.Body
+	reader, writer := io.Pipe()
+	resp.Body = reader
+	resp.ContentLength = -1
+	resp.Header.Del("Content-Length")
+	go func() {
+		defer upstream.Close()
+		err := c.copyCodexSSE(upstream, writer)
+		_ = writer.CloseWithError(err)
+	}()
+}
+
+// copyCodexSSE copies SSE events as each one finishes. response.output_item.done
+// items are remembered, and only response.completed is rewritten.
+func (c *loggingTransport) copyCodexSSE(src io.Reader, dst io.Writer) error {
+	reader := bufio.NewReader(src)
+	var forwarded bytes.Buffer
+	var items []json.RawMessage
+	for {
+		event, err := readSSEEvent(reader)
+		if len(event) > 0 {
+			out := c.prepareCodexEvent(event, &items)
+			if len(out) > 0 {
+				if _, werr := dst.Write(out); werr != nil {
+					return werr
+				}
+				forwarded.Write(out)
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if forwarded.Len() > 0 {
+		c.fullLogf("Response body: %s", forwarded.String())
+	}
+	if c.usageLogFile != "" {
+		extractStreamingUsage(c.usageLogFile, forwarded.Bytes())
+	}
+	return nil
+}
+
+// prepareCodexEvent drops Grok keepalives when that mode is on, records output
+// items, and fills response.completed. Other events are unchanged.
+func (c *loggingTransport) prepareCodexEvent(event []byte, items *[]json.RawMessage) []byte {
+	if c.feedToGrokCLI {
+		event = filterGrokCLIKeepalives(event, c.logf, c.fullLogf)
+		if len(bytes.TrimSpace(event)) == 0 {
+			return nil
+		}
+	}
+	collectCodexOutputItems(event, items)
+	return patchCodexEvent(event, *items)
+}
+
+// readSSEEvent returns the next SSE event, including its terminating blank line.
+// A short read in the middle of an event stays buffered until the event ends.
+func readSSEEvent(r *bufio.Reader) ([]byte, error) {
+	var buf bytes.Buffer
+	for {
+		line, err := r.ReadBytes('\n')
+		if len(line) > 0 {
+			buf.Write(line)
+			if sseBlankLine(line) {
+				return buf.Bytes(), err
+			}
+		}
+		if err != nil {
+			if buf.Len() == 0 {
+				return nil, err
+			}
+			return buf.Bytes(), err
+		}
+	}
+}
+
+func sseBlankLine(line []byte) bool {
+	return len(bytes.TrimRight(line, "\r\n")) == 0
+}
+
+func collectCodexOutputItems(event []byte, items *[]json.RawMessage) {
+	for _, line := range strings.Split(string(event), "\n") {
+		jsonData, ok := parseSSEData(strings.TrimRight(line, "\r"))
 		if !ok {
 			continue
 		}
@@ -269,54 +362,63 @@ func patchCodexSSEOutput(body []byte) []byte {
 			continue
 		}
 		if ev.Type == "response.output_item.done" && len(ev.Item) > 0 {
-			outputItems = append(outputItems, ev.Item)
+			*items = append(*items, ev.Item)
 		}
 	}
-	if len(outputItems) == 0 {
-		return body
-	}
+}
 
-	// Patch the response.completed event to include collected output items.
-	var result []string
-	for _, line := range lines {
-		jsonData, ok := parseSSEData(line)
-		if !ok {
-			result = append(result, line)
-			continue
-		}
-		if !strings.Contains(jsonData, "response.completed") {
-			result = append(result, line)
-			continue
-		}
-		var ev map[string]interface{}
-		if err := json.Unmarshal([]byte(jsonData), &ev); err != nil {
-			result = append(result, line)
-			continue
-		}
-		if t, _ := ev["type"].(string); t != "response.completed" {
-			result = append(result, line)
-			continue
-		}
-		resp, ok := ev["response"].(map[string]interface{})
-		if !ok {
-			result = append(result, line)
-			continue
-		}
-		items := make([]interface{}, len(outputItems))
-		for i, raw := range outputItems {
-			var v interface{}
-			json.Unmarshal(raw, &v)
-			items[i] = v
-		}
-		resp["output"] = items
-		newData, err := json.Marshal(ev)
-		if err != nil {
-			result = append(result, line)
-			continue
-		}
-		result = append(result, "data: "+string(newData))
+// patchCodexEvent fills response.completed output from items already seen.
+// Events that are not the completed event are returned unchanged.
+func patchCodexEvent(event []byte, items []json.RawMessage) []byte {
+	if len(items) == 0 {
+		return event
 	}
-	return []byte(strings.Join(result, "\n"))
+	lines := strings.Split(string(event), "\n")
+	changed := false
+	for i, line := range lines {
+		jsonData, ok := parseSSEData(strings.TrimRight(line, "\r"))
+		if !ok || !strings.Contains(jsonData, "response.completed") {
+			continue
+		}
+		patched, ok := patchCompletedData(jsonData, items)
+		if !ok {
+			continue
+		}
+		lines[i] = "data: " + patched
+		changed = true
+	}
+	if !changed {
+		return event
+	}
+	return []byte(strings.Join(lines, "\n"))
+}
+
+func patchCompletedData(jsonData string, items []json.RawMessage) (string, bool) {
+	var ev map[string]interface{}
+	if err := json.Unmarshal([]byte(jsonData), &ev); err != nil {
+		return "", false
+	}
+	if t, _ := ev["type"].(string); t != "response.completed" {
+		return "", false
+	}
+	resp, ok := ev["response"].(map[string]interface{})
+	if !ok {
+		return "", false
+	}
+	output := make([]interface{}, len(items))
+	for i, raw := range items {
+		var v interface{}
+		if err := json.Unmarshal(raw, &v); err != nil {
+			return "", false
+		}
+		output[i] = v
+	}
+	resp["output"] = output
+	encoded, err := json.Marshal(ev)
+	if err != nil {
+		return "", false
+	}
+	return string(encoded), true
 }
 
 func parseSSEData(line string) (string, bool) {

@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -9,7 +10,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // mockRoundTripper is a mock implementation of http.RoundTripper for testing.
@@ -269,6 +272,106 @@ func TestFilterGrokCLIKeepalivesLeavesStreamsWithoutKeepalivesUnchanged(t *testi
 	)
 	if !bytes.Equal(got, body) {
 		t.Fatalf("stream changed:\n got: %q\nwant: %q", got, body)
+	}
+}
+
+func TestReadSSEEventReassemblesASplitEvent(t *testing.T) {
+	reader := bufio.NewReader(io.MultiReader(
+		strings.NewReader("data: {\"type\":\"response.cre"),
+		strings.NewReader("ated\"}\n\n"),
+	))
+	event, err := readSSEEvent(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(event) != "data: {\"type\":\"response.created\"}\n\n" {
+		t.Fatalf("event = %q", event)
+	}
+}
+
+func TestCodexStreamForwardsEventsBeforeUpstreamFinishes(t *testing.T) {
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	finishUpstream := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(finishUpstream)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Errorf("upstream response writer cannot flush")
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.cre")
+		flusher.Flush()
+		_, _ = io.WriteString(w, "ated\",\"response\":{\"id\":\"resp_1\"}}\n\n")
+		flusher.Flush()
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"id\":\"msg_1\"}}\n\n")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"output\":[]}}\n\n")
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httptest.NewServer(newProxyWithOptions(target, nil, false, proxyOptions{codexTransform: true}))
+	defer proxy.Close()
+
+	req, err := http.NewRequest(http.MethodPost, proxy.URL+"/responses", strings.NewReader(`{"model":"gpt-test","input":[],"stream":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if got := resp.Header.Get("Content-Type"); got != "text/plain" {
+		t.Fatalf("Content-Type = %q, want the upstream type unchanged", got)
+	}
+	if resp.ContentLength != -1 {
+		t.Fatalf("ContentLength = %d, want chunked", resp.ContentLength)
+	}
+
+	first := make(chan string, 1)
+	go func() {
+		reader := bufio.NewReader(resp.Body)
+		event, readErr := readSSEEvent(reader)
+		if readErr != nil && readErr != io.EOF {
+			first <- readErr.Error()
+			return
+		}
+		first <- string(event)
+	}()
+	select {
+	case got := <-first:
+		if !strings.Contains(got, `"type":"response.created"`) {
+			t.Fatalf("first event = %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first SSE event was not forwarded before the upstream finished")
+	}
+	finishUpstream()
+
+	rest, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rest), `"output":[]`) {
+		t.Fatalf("completed output was not filled: %s", rest)
+	}
+	if !strings.Contains(string(rest), `"id":"msg_1"`) {
+		t.Fatalf("completed output missing the streamed item: %s", rest)
 	}
 }
 
