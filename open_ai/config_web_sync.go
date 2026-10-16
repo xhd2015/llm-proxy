@@ -3,6 +3,7 @@ package openai
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +17,7 @@ import (
 // Sync targets map a preview file to the runner file it is meant to be merged
 // into. A "file" target replaces the whole file (the Codex model catalog); a
 // "fragment" target owns one region inside a larger file the runner also
-// writes (the DSH providers block inside settings.yaml). Only the region a
+// writes (the DSH provider entry inside cordis.patch.yml). Only the region a
 // preview owns is ever read, diffed, or replaced: the rest of the runner file
 // belongs to the runner and stays byte-identical.
 const (
@@ -32,7 +33,7 @@ const (
 )
 
 // The preview formats the engine understands. The format selects how a region
-// is located inside the runner file: a YAML block for DSH, a run of TOML
+// is located inside the runner file: a Cordis patch entry for DSH, a run of TOML
 // [model.*] tables for Grok.
 const (
 	configWebFormatYAML = "yaml"
@@ -44,16 +45,11 @@ const (
 // [model_providers.*], which belong to the user.
 const configWebGrokModelPrefix = "[model."
 
-// configWebDSHFragmentKey is the top-level settings key the DSH preview owns;
-// everything else in settings.yaml (ui-onboarding, agent-default-model,
-// llm-deepseek, permission, agent-presets) is not ours to touch.
-const configWebDSHFragmentKey = "llm-proxy-providers"
+// configWebDSHFragmentKey is the Loader entry id the DSH preview owns.
+const configWebDSHFragmentKey = "llm-pi-ai"
 
-// The DSH settings provider serializes its own writers through a `wx`-created
-// `<file>.lock` sibling and fails the contender after two seconds rather than
-// guessing whether an existing lock still has an owner. Sync mirrors that
-// protocol so a concurrent DSH write cannot be lost, and never removes a lock
-// this process did not create.
+// DSH serializes profile edits through package.json.lock. Contenders wait
+// for the owner and never remove a lock this process did not create.
 const (
 	configWebLockWait       = 2 * time.Second
 	configWebLockBackoff    = 20 * time.Millisecond
@@ -79,10 +75,10 @@ type configWebLineSpan struct {
 
 // previewSyncTarget is the on-disk counterpart of one preview file.
 type previewSyncTarget struct {
-	Path   string
-	Key    string // fragment key; empty means the preview is the whole file
-	Format string // configWebFormatYAML or configWebFormatTOML
-	Locked bool   // the runner serializes writers through <Path>.lock
+	Path     string
+	Key      string // Cordis entry id or TOML table prefix
+	Format   string // configWebFormatYAML or configWebFormatTOML
+	LockFile string // the runner serializes writers through <LockFile>.lock
 	// Editable reports whether Save may write this target. The Grok target is
 	// compare-only: its [model.*] tables are shared with other tools and the
 	// same keys can point at a different proxy, so the editor never writes it.
@@ -93,16 +89,16 @@ type previewSyncTarget struct {
 var configWebDSHSettingsPathFn = configWebDSHSettingsPath
 
 // configWebDSHSettingsPath mirrors DSH's own home resolution: $DSH_HOME when it
-// holds a non-blank value, else ~/.dsh, then settings.yaml inside it.
+// holds a non-blank value, else ~/.dsh, then the Web profile's patch file.
 func configWebDSHSettingsPath() string {
 	if dir := strings.TrimSpace(os.Getenv("DSH_HOME")); dir != "" {
-		return filepath.Join(dir, "settings.yaml")
+		return filepath.Join(dir, "profiles", "web", "cordis.patch.yml")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || strings.TrimSpace(home) == "" {
 		return ""
 	}
-	return filepath.Join(home, ".dsh", "settings.yaml")
+	return filepath.Join(home, ".dsh", "profiles", "web", "cordis.patch.yml")
 }
 
 // configWebGrokConfigPathFn resolves the Grok config document; tests redirect it.
@@ -130,13 +126,13 @@ func previewSyncTargetFor(runner, name string) (previewSyncTarget, bool) {
 		if path == "" {
 			return previewSyncTarget{}, false
 		}
-		return previewSyncTarget{Path: path, Key: configWebDSHFragmentKey, Format: configWebFormatYAML, Locked: true, Editable: true}, true
+		return previewSyncTarget{Path: path, Key: configWebDSHFragmentKey, Format: configWebFormatYAML, LockFile: filepath.Join(filepath.Dir(path), "package.json"), Editable: true}, true
 	case runner == "grok" && name == "llm-proxy-grok.toml":
 		path := configWebGrokConfigPathFn()
 		if path == "" {
 			return previewSyncTarget{}, false
 		}
-		return previewSyncTarget{Path: path, Key: configWebGrokModelPrefix, Format: configWebFormatTOML, Locked: false, Editable: false}, true
+		return previewSyncTarget{Path: path, Key: configWebGrokModelPrefix, Format: configWebFormatTOML, Editable: false}, true
 	}
 	return previewSyncTarget{}, false
 }
@@ -164,37 +160,61 @@ func joinFileLines(lines []string, trailing bool) string {
 	return text
 }
 
-// yamlKeyBlockSpan locates a top-level mapping key's block: from the line
-// holding "<key>:" at column 0 through the last non-blank line before the next
-// column-0 non-comment line. Trailing blank lines stay outside the span so the
-// blank separator that follows the block survives a splice untouched.
-func yamlKeyBlockSpan(lines []string, key string) (configWebLineSpan, bool) {
-	prefix := key + ":"
-	start := -1
-	for i, line := range lines {
-		if !strings.HasPrefix(line, prefix) {
+// cordisPatch parses the list without evaluating Cordis's !!js expressions.
+func cordisPatch(text string) (*yaml.Node, error) {
+	var doc yaml.Node
+	decoder := yaml.NewDecoder(strings.NewReader(text))
+	if err := decoder.Decode(&doc); err != nil && err != io.EOF {
+		return nil, fmt.Errorf("%w: %v", errConfigWebUnparsable, err)
+	}
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return nil, fmt.Errorf("%w: expected a single YAML document", errConfigWebUnparsable)
+	}
+	if len(doc.Content) == 0 || doc.Content[0].Kind != yaml.SequenceNode {
+		return nil, fmt.Errorf("%w: Cordis patches must be a YAML sequence", errConfigWebUnparsable)
+	}
+	root := doc.Content[0]
+	var value any
+	if err := root.Decode(&value); err != nil {
+		return nil, fmt.Errorf("%w: %v", errConfigWebUnparsable, err)
+	}
+	if root.Style&yaml.FlowStyle != 0 && len(root.Content) != 0 {
+		return nil, fmt.Errorf("%w: expand the Cordis patch list onto separate lines before editing", errConfigWebUnparsable)
+	}
+	return root, nil
+}
+
+// cordisEntrySpan addresses an entry by its parsed id, including when name
+// precedes id. Duplicate entries are refused rather than choosing precedence.
+// Separating blank lines and column-zero comments remain outside the edit.
+func cordisEntrySpan(lines []string, key string) (configWebLineSpan, bool, error) {
+	root, err := cordisPatch(strings.Join(lines, "\n"))
+	if err != nil {
+		return configWebLineSpan{}, false, err
+	}
+	index := -1
+	for i, row := range root.Content {
+		id := mappingChild(row, "id")
+		if id == nil || id.Value != key {
 			continue
 		}
-		rest := line[len(prefix):]
-		if rest == "" || strings.HasPrefix(rest, " ") || strings.HasPrefix(rest, "#") {
-			start = i
-			break
+		if index >= 0 {
+			return configWebLineSpan{}, false, fmt.Errorf("%w: duplicate Cordis entry %s", errConfigWebUnparsable, key)
 		}
+		index = i
 	}
-	if start < 0 {
-		return configWebLineSpan{}, false
+	if index < 0 {
+		return configWebLineSpan{}, false, nil
 	}
-	end := start
-	for i := start + 1; i < len(lines); i++ {
-		line := lines[i]
-		if line != "" && line[0] != ' ' && line[0] != '\t' && line[0] != '#' {
-			break
-		}
-		if strings.TrimSpace(line) != "" {
-			end = i
-		}
+	start, end := root.Content[index].Line, len(lines)
+	if index+1 < len(root.Content) {
+		end = root.Content[index+1].Line - 1
 	}
-	return configWebLineSpan{Start: start + 1, End: end + 1}, true
+	for end > start && (strings.TrimSpace(lines[end-1]) == "" || strings.HasPrefix(lines[end-1], "#")) {
+		end--
+	}
+	return configWebLineSpan{Start: start, End: end}, true, nil
 }
 
 // tomlModelRunSpan locates the contiguous run of [model.<id>] tables the Grok
@@ -236,11 +256,12 @@ func regionText(lines []string, span configWebLineSpan) string {
 }
 
 // blockSpan locates the region a target owns inside a document of its format.
-func (t previewSyncTarget) blockSpan(lines []string) (configWebLineSpan, bool) {
+func (t previewSyncTarget) blockSpan(lines []string) (configWebLineSpan, bool, error) {
 	if t.Format == configWebFormatTOML {
-		return tomlModelRunSpan(lines)
+		span, found := tomlModelRunSpan(lines)
+		return span, found, nil
 	}
-	return yamlKeyBlockSpan(lines, t.Key)
+	return cordisEntrySpan(lines, t.Key)
 }
 
 // previewRegion reduces a generated export to the region the target owns, so the
@@ -249,8 +270,8 @@ func (t previewSyncTarget) blockSpan(lines []string) (configWebLineSpan, bool) {
 // outside the region and is never written.
 func (t previewSyncTarget) previewRegion(preview string) string {
 	lines, _ := splitFileLines(preview)
-	span, ok := t.blockSpan(lines)
-	if !ok {
+	span, ok, err := t.blockSpan(lines)
+	if err != nil || !ok {
 		return preview
 	}
 	return regionText(lines, span)
@@ -261,7 +282,7 @@ func (t previewSyncTarget) missingNote(path string) string {
 	if t.Format == configWebFormatTOML {
 		return fmt.Sprintf("%s has no [model.*] table yet.", displayHomePath(path))
 	}
-	return fmt.Sprintf("%s has no %s block yet; syncing adds one.", displayHomePath(path), t.Key)
+	return fmt.Sprintf("%s has no %s entry yet; syncing adds one.", displayHomePath(path), t.Key)
 }
 
 // readSyncTarget reads the on-disk half of a target in its own format. state is
@@ -284,7 +305,10 @@ func readSyncTarget(target previewSyncTarget) (state, region, hash, note string)
 	}
 	hash = configWebRevision(data)
 	lines, _ := splitFileLines(string(data))
-	span, ok := target.blockSpan(lines)
+	span, ok, parseErr := target.blockSpan(lines)
+	if parseErr != nil {
+		return configWebTargetUnreadable, "", hash, parseErr.Error()
+	}
 	if !ok {
 		return configWebTargetMissing, "", hash, target.missingNote(target.Path)
 	}
@@ -357,6 +381,10 @@ func appendFragmentRegion(text, region string) string {
 	if strings.TrimSpace(text) == "" {
 		return region
 	}
+	if root, err := cordisPatch(text); err == nil && len(root.Content) == 0 {
+		lines, _ := splitFileLines(text)
+		return replaceFragmentRegion(lines, configWebLineSpan{Start: root.Line, End: root.Line}, region)
+	}
 	trimmed := strings.TrimRight(text, "\n")
 	return trimmed + "\n\n" + region
 }
@@ -364,12 +392,32 @@ func appendFragmentRegion(text, region string) string {
 // validateSyncedFragment re-parses a synced document and requires the synced
 // block to be present, so a bad splice can never reach the runner's file.
 func validateSyncedFragment(text, key string) error {
-	var doc yaml.Node
-	if err := yaml.Unmarshal([]byte(text), &doc); err != nil {
-		return fmt.Errorf("%w: %v", errConfigWebUnparsable, err)
+	root, err := cordisPatch(text)
+	if err != nil {
+		return err
 	}
-	if len(doc.Content) == 0 || mappingChild(doc.Content[0], key) == nil {
-		return fmt.Errorf("%w: the %s block is missing from the result", errConfigWebUnparsable, key)
+	count := 0
+	for _, row := range root.Content {
+		id := mappingChild(row, "id")
+		if id == nil || id.Value != key {
+			continue
+		}
+		count++
+		name := mappingChild(row, "name")
+		providers := mappingChild(mappingChild(row, "config"), "providers")
+		if name == nil || name.Value != "@deepseek-ai/dsh-llm-pi-ai" || providers == nil || providers.Kind != yaml.MappingNode {
+			return fmt.Errorf("%w: %s must configure @deepseek-ai/dsh-llm-pi-ai with a config.providers mapping", errConfigWebUnparsable, key)
+		}
+		for i := 0; i+1 < len(row.Content); i += 2 {
+			switch row.Content[i].Value {
+			case "id", "name", "config":
+			default:
+				return fmt.Errorf("%w: the provider entry cannot change %s", errConfigWebUnparsable, row.Content[i].Value)
+			}
+		}
+	}
+	if count != 1 {
+		return fmt.Errorf("%w: expected one %s entry, found %d", errConfigWebUnparsable, key, count)
 	}
 	return nil
 }
@@ -483,19 +531,21 @@ func writeSyncedFile(path, content string) (result, backup string, err error) {
 // before the backup and the atomic replace.
 func saveConfigWebFragment(target previewSyncTarget, preview, hash, region string, dryRun bool) (result, backup, content string, err error) {
 	// Reduce whatever was submitted to the block itself, so a stray paste of a
-	// neighbouring key or a trailing document cannot widen the write.
-	block := previewFragmentRegion(region, target.Key)
-	if strings.TrimSpace(block) == "" || !strings.HasPrefix(block, target.Key+":") {
-		return "", "", "", fmt.Errorf("%w: keep the %s: line at the start of the block", errConfigWebEmptyRegion, target.Key)
+	// neighbouring entry cannot widen the write.
+	if strings.TrimSpace(region) == "" {
+		return "", "", "", errConfigWebEmptyRegion
 	}
-	if err := validateSyncedFragment(block, target.Key); err != nil {
+	if err := validateSyncedFragment(region, target.Key); err != nil {
 		return "", "", "", err
 	}
-	preview = previewFragmentRegion(preview, target.Key)
+	block := previewFragmentRegion(region, target.Key)
 	data, err := os.ReadFile(target.Path)
 	missingFile := os.IsNotExist(err)
 	if err != nil && !missingFile {
 		return "", "", "", err
+	}
+	if missingFile && hash != "" {
+		return "", "", "", errConfigWebChanged
 	}
 	if !missingFile && configWebRevision(data) != hash {
 		return "", "", "", errConfigWebChanged
@@ -517,15 +567,18 @@ func saveConfigWebFragment(target previewSyncTarget, preview, hash, region strin
 			return "", "", "", err
 		}
 		defer release()
-		if current, readErr := os.ReadFile(target.Path); readErr == nil && configWebRevision(current) != hash {
-			return "", "", "", errConfigWebChanged
+		if err := checkConfigWebRevision(target.Path, hash); err != nil {
+			return "", "", "", err
 		}
 		result, backup, err = writeSyncedFile(target.Path, next)
 		return result, backup, "", err
 	}
 	text := string(data)
 	lines, trailing := splitFileLines(text)
-	span, located := yamlKeyBlockSpan(lines, target.Key)
+	span, located, parseErr := cordisEntrySpan(lines, target.Key)
+	if parseErr != nil {
+		return "", "", "", parseErr
+	}
 	var next string
 	if located {
 		next = replaceFragmentRegion(lines, span, block)
@@ -551,20 +604,37 @@ func saveConfigWebFragment(target previewSyncTarget, preview, hash, region strin
 	defer release()
 	// Re-check under the lock: another writer may have committed since the
 	// revision check above.
-	if current, readErr := os.ReadFile(target.Path); readErr == nil && configWebRevision(current) != hash {
-		return "", "", "", errConfigWebChanged
+	if err := checkConfigWebRevision(target.Path, hash); err != nil {
+		return "", "", "", err
 	}
 	result, backup, err = writeSyncedFile(target.Path, next)
 	return result, backup, "", err
 }
 
+func checkConfigWebRevision(path, hash string) error {
+	current, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		if hash == "" {
+			return nil
+		}
+		return errConfigWebChanged
+	}
+	if err != nil {
+		return err
+	}
+	if configWebRevision(current) != hash {
+		return errConfigWebChanged
+	}
+	return nil
+}
+
 // configWebAcquire takes the writer lock only for targets whose runner
 // serializes writers through a lock file.
 func configWebAcquire(target previewSyncTarget) (func(), error) {
-	if !target.Locked {
+	if target.LockFile == "" {
 		return func() {}, nil
 	}
-	return acquireConfigWebLock(target.Path)
+	return acquireConfigWebLock(target.LockFile)
 }
 
 // previewFragmentRegion returns the block of a preview's own text that the
@@ -573,8 +643,8 @@ func configWebAcquire(target previewSyncTarget) (func(), error) {
 // anything trailing it are not part of the block and are never written.
 func previewFragmentRegion(preview, key string) string {
 	lines, _ := splitFileLines(preview)
-	span, ok := yamlKeyBlockSpan(lines, key)
-	if !ok {
+	span, ok, err := cordisEntrySpan(lines, key)
+	if err != nil || !ok {
 		return preview
 	}
 	return regionText(lines, span)

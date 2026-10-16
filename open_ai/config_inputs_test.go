@@ -54,7 +54,10 @@ func TestConfigInputs(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, expected := range []string{"llm-proxy-providers:", "llm-proxy-codex:", "apiKeyEnv: CODEX_API_KEY", "input: [ " + strings.Join(tc.want, ", ") + " ]"} {
+			if err := validateSyncedFragment(output, configWebDSHFragmentKey); err != nil {
+				t.Fatalf("export is not a provider patch: %v", err)
+			}
+			for _, expected := range []string{"- id: llm-pi-ai", "name: '@deepseek-ai/dsh-llm-pi-ai'", "llm-proxy-codex:", "apiKeyEnv: CODEX_API_KEY", "input: [ " + strings.Join(tc.want, ", ") + " ]"} {
 				if !strings.Contains(output, expected) {
 					t.Fatalf("missing %q in %s", expected, output)
 				}

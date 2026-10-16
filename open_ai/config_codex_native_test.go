@@ -439,7 +439,7 @@ func TestConfigWebCatalogInstallLifecycle(t *testing.T) {
 	codexCatalogTargetPathFn = func() string { return filepath.Join(tempHome, ".codex", configModelsCatalogFileName) }
 	defer func() { codexCatalogTargetPathFn = orig }()
 	origDSH := configWebDSHSettingsPathFn
-	configWebDSHSettingsPathFn = func() string { return filepath.Join(tempHome, ".dsh", "settings.yaml") }
+	configWebDSHSettingsPathFn = func() string { return filepath.Join(tempHome, ".dsh", "profiles", "web", "cordis.patch.yml") }
 	defer func() { configWebDSHSettingsPathFn = origDSH }()
 	origGrok := configWebGrokConfigPathFn
 	configWebGrokConfigPathFn = func() string { return filepath.Join(tempHome, ".grok", "config.toml") }

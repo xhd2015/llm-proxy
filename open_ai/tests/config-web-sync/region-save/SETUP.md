@@ -29,11 +29,11 @@ func Setup(t *testing.T, d *session.Doctest, req *Request) error {
 	t.Helper()
 	req.Path = writeSettings(t, settingsText)
 	req.Preview = previewText
-	req.Region = blockOf(t, settingsText) + `    llm-proxy-typed:
-      displayName: Typed In Pane
-      models:
-        - id: typed-one
-          name: Typed One
+	req.Region = blockOf(t, settingsText) + `      llm-proxy-typed:
+        displayName: Typed In Pane
+        models:
+          - id: typed-one
+            name: Typed One
 `
 	return nil
 }

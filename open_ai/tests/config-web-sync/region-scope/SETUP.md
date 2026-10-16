@@ -3,8 +3,8 @@
 **Feature**: the diff is scoped to the block the preview owns, not the file.
 
 ```
-# settings.yaml (head + block + tail) + preview -> region = block only
-settingsText + previewText -> ConfigWebSyncDiff -> Region starts at "llm-proxy-providers:"
+# cordis.patch.yml (head + block + tail) + preview -> region = block only
+settingsText + previewText -> ConfigWebSyncDiff -> Region starts at "llm-pi-ai:"
 ```
 
 ## Preconditions

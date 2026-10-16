@@ -167,7 +167,7 @@ func printGrokSetup(endpoint string, cache grokapi.ModelsCache) {
 		}
 		fmt.Printf("  %s\n", line)
 	}
-	fmt.Printf("\nDeepseek Harness — add to ~/.dsh/settings.yaml:\n")
+	fmt.Printf("\nDeepseek Harness — add to ~/.dsh/profiles/web/cordis.patch.yml:\n")
 	dsh := grokapi.DSHSettingsYAML(endpoint, cache)
 	for _, line := range strings.Split(strings.TrimRight(dsh, "\n"), "\n") {
 		fmt.Printf("  %s\n", line)

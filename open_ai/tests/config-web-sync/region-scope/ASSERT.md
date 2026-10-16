@@ -32,7 +32,7 @@ func Assert(t *testing.T, d *session.Doctest, req *Request, resp *Response, err 
 	if resp.Diff.Hash == "" {
 		t.Fatal("hash must identify the file revision")
 	}
-	if !strings.HasPrefix(resp.Diff.Region, providersKey+":") {
+	if !strings.HasPrefix(resp.Diff.Region, "- id: "+providersKey) {
 		t.Fatalf("region must start at the owned key:\n%s", resp.Diff.Region)
 	}
 	for _, foreign := range []string{"ui-onboarding", "permission", "welcomeNoticeVersion"} {

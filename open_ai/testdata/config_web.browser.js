@@ -105,7 +105,7 @@
   edit($('raw'), validText);
   await wait(() => !$('save').disabled);
   clickTab('preview');
-  await wait(() => $('preview-content').textContent.includes('llm-proxy-providers:'));
+  await wait(() => $('preview-content').textContent.includes('- id: llm-pi-ai'));
   assert($('preview-content').textContent.includes('apiKeyEnv:'), 'Missing credential references');
   const previews = (await (await fetch('/api/validate', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:validText})})).json()).previews;
   const originalCopy = navigator.clipboard.writeText;

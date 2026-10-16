@@ -14,6 +14,7 @@ N/A
 
 ```go
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/xhd2015/doctest/session"
@@ -21,13 +22,13 @@ import (
 
 func Assert(t *testing.T, d *session.Doctest, req *Request, resp *Response, err error) {
 	t.Helper()
-	assertErrContains(t, err, req.Path+".lock")
+	assertErrContains(t, err, filepath.Join(filepath.Dir(req.Path), "package.json.lock"))
 	if resp.After != resp.Before {
 		t.Fatal("a locked save must not write")
 	}
 	found := false
 	for _, name := range resp.Files {
-		if name == "settings.yaml.lock" {
+		if name == "package.json.lock" {
 			found = true
 		}
 	}

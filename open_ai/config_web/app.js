@@ -127,35 +127,6 @@ function fragmentStatus(file) {
   const count = file.targetChanges || 0;
   return `${count} ${count === 1 ? 'line differs' : 'lines differ'} from ${file.targetPath}.`;
 }
-// reduceBlock mirrors the server's block location so Save can say up front what
-// will be written: the server only ever splices the owned block, so text the
-// reader adds outside it cannot be saved and must not vanish silently.
-function reduceBlock(text, key) {
-  const lines = String(text || '').split('\n');
-  let start = -1;
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i] === key + ':' || lines[i].startsWith(key + ': ') || lines[i].startsWith(key + ':\t')) {
-      start = i;
-      break;
-    }
-  }
-  if (start < 0) return {block: '', outside: 0};
-  let end = lines.length;
-  for (let i = start + 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (line !== '' && line[0] !== ' ' && line[0] !== '\t' && line[0] !== '#') {
-      end = i;
-      break;
-    }
-  }
-  let last = end - 1;
-  while (last > start && lines[last].trim() === '') last--;
-  const dropped = lines.slice(start, last + 1).length;
-  const outside = lines.slice(0, start).filter(line => line.trim() !== '').length
-    + lines.slice(last + 1).filter(line => line.trim() !== '').length;
-  return {block: lines.slice(start, last + 1).join('\n') + '\n', outside, dropped};
-}
-
 // The pane the reader can edit: the Monaco model, or the textarea fallback when
 // the editor bundle is unavailable.
 function syncPaneValue() {
@@ -223,22 +194,15 @@ async function syncSave() {
   const file = selectedPreviewFile();
   if (busy || !isFragmentFile(file) || !syncData || syncConflict) return;
   const region = syncPaneValue();
-  const reduced = reduceBlock(region, file.targetKey);
-  if (reduced.outside > 0) {
-    message(`Only the ${file.targetKey} block is saved; ${reduced.outside} line(s) outside it will be ignored.`);
-  }
-  if (reduced.block === (syncData.disk || '')) {
-    if (!reduced.outside) message('No file changes.');
-    return;
-  }
   busy = true;
   state();
   try {
     const value = await api('sync', {text, runner: previewRunner, file: file.name, mergeNative: mergeNativeEnabled(), hash: syncData.target?.targetHash || '', region});
     syncDirty = false;
-    message(value.result === 'unchanged'
+    const outcome = value.result === 'unchanged'
       ? 'No file changes.'
-      : `Saved ${value.path}` + (value.backup ? `\nBackup: ${value.backup}` : '') + `\n${previewRunner.toUpperCase()} reloads its settings without a restart.`);
+      : `Saved ${value.path}` + (value.backup ? `\nBackup: ${value.backup}` : '') + `\n${previewRunner.toUpperCase()} reloads its settings without a restart.`;
+    message(outcome + (value.ignoredOutside ? `\nText outside the ${file.targetKey} entry was ignored.` : ''));
     await validate();
     syncRefresh(false);
   } catch (err) {

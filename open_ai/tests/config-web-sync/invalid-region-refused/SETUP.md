@@ -29,7 +29,7 @@ func Setup(t *testing.T, d *session.Doctest, req *Request) error {
 	t.Helper()
 	req.Path = writeSettings(t, settingsText)
 	req.Preview = previewText
-	req.Region = providersKey + ":\n  providers:\n    a:\n\t- bad\n"
+	req.Region = "- id: " + providersKey + "\n  config:\n    providers:\n      a:\n\t- bad\n"
 	return nil
 }
 ```

@@ -38,7 +38,7 @@ func Assert(t *testing.T, d *session.Doctest, req *Request, resp *Response, err 
 	if resp.After != resp.Before {
 		t.Fatal("a dry run must not write the file")
 	}
-	if len(resp.Files) != 1 || resp.Files[0] != "settings.yaml" {
+	if len(resp.Files) != 1 || resp.Files[0] != "cordis.patch.yml" {
 		t.Fatalf("a dry run must leave no artifacts: %v", resp.Files)
 	}
 }

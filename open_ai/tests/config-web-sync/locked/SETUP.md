@@ -4,14 +4,14 @@
 editor never removes a lock it does not own.
 
 ```
-# <file>.lock exists -> refuse, leave the lock alone
+# package.json.lock exists -> refuse, leave the lock alone
 settingsText + previewText + foreign lock -> ConfigWebSaveRegion -> error naming the lock
 ```
 
 ## Preconditions
 
 - The runner file and preview from the root fixtures.
-- A foreign `<settings.yaml>.lock` exists, as a concurrent runner writer leaves.
+- A foreign `package.json.lock` exists, as a concurrent runner writer leaves.
 
 ## Steps
 

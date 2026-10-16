@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestLoadProxyConfigResolvesAndValidatesVariantRoutes(t *testing.T) {
@@ -164,6 +166,40 @@ func TestGenerateConfigDSHModelsRendersMetadata(t *testing.T) {
 		if !strings.Contains(output, expected) {
 			t.Errorf("output missing %q:\n%s", expected, output)
 		}
+	}
+}
+
+func TestGenerateConfigDSHModelsQuotesUserStrings(t *testing.T) {
+	label := "Gateway: coding #1\nSecond line"
+	routes := []effectiveRoute{{
+		provider:        configProvider{Name: "gateway: local", Kind: "http-proxy"},
+		protocol:        "openai-responses",
+		clientModelName: "false",
+		displayName:     label,
+		input:           []string{"text", "image"},
+		reasoning:       configReasoning{Disabled: true},
+	}}
+	output, err := generateConfigDSHModels("127.0.0.1:8890", routes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var patches []map[string]any
+	if err := yaml.Unmarshal([]byte(output), &patches); err != nil {
+		t.Fatalf("export does not parse: %v\n%s", err, output)
+	}
+	config := patches[0]["config"].(map[string]any)
+	providers := config["providers"].(map[string]any)
+	provider := providers["llm-proxy-gateway: local"].(map[string]any)
+	if provider["displayName"] != "GATEWAY: LOCAL (llm-proxy)" {
+		t.Fatalf("provider label changed: %v", provider["displayName"])
+	}
+	models := provider["models"].([]any)
+	model := models[0].(map[string]any)
+	if model["id"] != "false" || model["name"] != label {
+		t.Fatalf("id or label changed: %v", model)
+	}
+	if provider["reasoning"] != "off" || !strings.Contains(output, "input: [ text, image ]") {
+		t.Fatalf("export lost its quoted reasoning level or compact modalities:\n%s", output)
 	}
 }
 

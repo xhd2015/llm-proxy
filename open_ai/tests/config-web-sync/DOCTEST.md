@@ -12,8 +12,8 @@ the exported seams `openai.ConfigWebSyncDiff` / `openai.ConfigWebSaveRegion`
 (`open_ai/doctest_seam.go`, pure delegation), because the doctest harness can
 only reach exported symbols.
 
-The runner file under test is a DSH `settings.yaml`-shaped document: a block the
-preview owns, plus neighbouring top-level keys that must survive a save
+The runner file under test is a DSH `cordis.patch.yml`-shaped document: a block the
+preview owns, plus neighbouring entries that must survive a save
 byte-for-byte. The target participates in the writer lock, as the real DSH one
 does. The submitted block is client-authored — it is what a reader typed into the
 right-hand pane — so these leaves also pin the containment that keeps that safe.
@@ -26,8 +26,8 @@ right-hand pane — so these leaves also pin the containment that keeps that saf
 
 **Participants**
 
-- **runner file** — a YAML document holding a `llm-proxy-providers` block among
-  keys the editor does not own (`ui-onboarding`, `permission`).
+- **runner file** — a YAML patch list holding the `llm-pi-ai` entry among
+  entries the editor does not own (`ui-onboarding`, `permission`).
 - **preview** — the generated block text, including a leading comment that is
   *not* part of the block.
 - **ConfigWebSyncDiff** — reads the file, locates the block, and reports the
@@ -39,7 +39,7 @@ right-hand pane — so these leaves also pin the containment that keeps that saf
 
 **Behaviors**
 
-- The block runs from its column-0 key to the line before the next column-0 key;
+- The block runs from its top-level entry to the line before the next top-level entry;
   the trailing blank separator stays outside it.
 - A preview's leading comment is outside the block and is never written.
 - A submitted region is reduced to the block: text a reader pasted above or
@@ -115,7 +115,7 @@ type Request struct {
 	Region string
 	// DryRun asks for the spliced document without a write.
 	DryRun bool
-	// Locked pre-creates a foreign <Path>.lock before saving.
+	// Locked pre-creates a foreign package.json.lock before saving.
 	Locked bool
 	// Hash overrides the revision submitted to the save ("" uses the diff's).
 	Hash string
@@ -136,7 +136,7 @@ func Run(t *testing.T, d *session.Doctest, req *Request) (*Response, error) {
 	t.Helper()
 	resp := &Response{Before: readFileOrEmpty(t, req.Path)}
 	if req.Locked {
-		if err := os.WriteFile(req.Path+".lock", []byte("4242\n"), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(filepath.Dir(req.Path), "package.json.lock"), []byte("4242\n"), 0o600); err != nil {
 			t.Fatalf("create foreign lock: %v", err)
 		}
 	}

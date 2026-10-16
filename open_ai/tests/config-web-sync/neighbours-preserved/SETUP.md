@@ -29,7 +29,7 @@ func Setup(t *testing.T, d *session.Doctest, req *Request) error {
 	t.Helper()
 	req.Path = writeSettings(t, settingsText)
 	req.Preview = previewText
-	req.Region = "ui-onboarding:\n  welcomeNoticeVersion: 9999\n\n" + blockOf(t, settingsText) + "\npermission:\n  defaultPreset: read-only\n"
+	req.Region = "- id: ui-onboarding\n  config:\n    welcomeNoticeVersion: 9999\n\n" + blockOf(t, settingsText) + "\n- id: permission\n  config:\n    defaultPreset: read-only\n"
 	return nil
 }
 ```

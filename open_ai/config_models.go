@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/xhd2015/less-gen/flags"
+	"gopkg.in/yaml.v3"
 )
 
 const configModelsHelp = `
@@ -496,14 +497,18 @@ func generateConfigDSHModels(listen string, routes []effectiveRoute) (string, er
 	base := "http://" + strings.Replace(listen, "localhost", "127.0.0.1", 1)
 	var out strings.Builder
 	fmt.Fprintln(&out, "# Store a non-empty placeholder for each apiKeyEnv in DSH credentials or the environment.")
-	fmt.Fprintln(&out, "llm-proxy-providers:")
-	fmt.Fprintln(&out, "  providers:")
+	fmt.Fprintln(&out, "- id: llm-pi-ai")
+	fmt.Fprintln(&out, "  name: '@deepseek-ai/dsh-llm-pi-ai'")
+	fmt.Fprintln(&out, "  config:")
+	fmt.Fprintln(&out, "    providers:")
 	for _, group := range groups {
 		baseURL := base
 		if group.protocol == "openai-responses" {
 			baseURL += "/v1"
 		}
-		writeDSHProvider(&out, group, baseURL)
+		if err := writeDSHProvider(&out, group, baseURL); err != nil {
+			return "", err
+		}
 	}
 	return out.String(), nil
 }
@@ -585,9 +590,31 @@ func dshProviderDisplayName(provider configProvider) string {
 	}
 }
 
-func writeDSHProvider(out *strings.Builder, group dshProviderGroup, baseURL string) {
-	fmt.Fprintf(out, "    %s:\n", group.name)
-	fmt.Fprintf(out, "      displayName: %s (llm-proxy)\n", group.display)
+// dshYAMLScalar keeps labels and ids as strings without adding physical lines
+// that would escape their field's indentation.
+func dshYAMLScalar(value string) (string, error) {
+	node := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value}
+	if strings.ContainsAny(value, "\r\n") {
+		node.Style = yaml.DoubleQuotedStyle
+	}
+	encoded, err := yaml.Marshal(node)
+	if err != nil {
+		return "", fmt.Errorf("encode DSH string: %w", err)
+	}
+	return strings.TrimSuffix(string(encoded), "\n"), nil
+}
+
+func writeDSHProvider(out *strings.Builder, group dshProviderGroup, baseURL string) error {
+	key, err := dshYAMLScalar(group.name)
+	if err != nil {
+		return err
+	}
+	display, err := dshYAMLScalar(group.display + " (llm-proxy)")
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "      %s:\n", key)
+	fmt.Fprintf(out, "        displayName: %s\n", display)
 	credential := strings.Map(func(r rune) rune {
 		if r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
 			return r
@@ -597,48 +624,57 @@ func writeDSHProvider(out *strings.Builder, group dshProviderGroup, baseURL stri
 	if credential[0] >= '0' && credential[0] <= '9' {
 		credential = "LLM_PROXY_" + credential
 	}
-	fmt.Fprintf(out, "      apiKeyEnv: %s\n", credential)
-	fmt.Fprintf(out, "      api: %s\n", group.protocol)
-	fmt.Fprintf(out, "      baseURL: %s\n", baseURL)
+	fmt.Fprintf(out, "        apiKeyEnv: %s\n", credential)
+	fmt.Fprintf(out, "        api: %s\n", group.protocol)
+	fmt.Fprintf(out, "        baseURL: %s\n", baseURL)
 	if group.reasoning != "" {
-		fmt.Fprintf(out, "      reasoning: %q\n", group.reasoning)
+		fmt.Fprintf(out, "        reasoning: %q\n", group.reasoning)
 	}
-	fmt.Fprintln(out, "      models:")
+	fmt.Fprintln(out, "        models:")
 	for _, route := range group.routes {
 		name := route.displayName
 		if name == "" {
 			name = route.clientModelName
 		}
-		fmt.Fprintf(out, "        - id: %s\n", route.clientModelName)
-		fmt.Fprintf(out, "          name: %s\n", name)
+		id, err := dshYAMLScalar(route.clientModelName)
+		if err != nil {
+			return err
+		}
+		label, err := dshYAMLScalar(name)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "          - id: %s\n", id)
+		fmt.Fprintf(out, "            name: %s\n", label)
 		if len(route.input) > 0 {
-			fmt.Fprintf(out, "          input: [ %s ]\n", strings.Join(route.input, ", "))
+			fmt.Fprintf(out, "            input: [ %s ]\n", strings.Join(route.input, ", "))
 		}
 		if route.contextWindow != nil {
-			fmt.Fprintf(out, "          contextWindow: %d\n", *route.contextWindow)
+			fmt.Fprintf(out, "            contextWindow: %d\n", *route.contextWindow)
 		}
 		if route.maxTokens != nil {
-			fmt.Fprintf(out, "          maxTokens: %d\n", *route.maxTokens)
+			fmt.Fprintf(out, "            maxTokens: %d\n", *route.maxTokens)
 		}
 		writeDSHCompat(out, route.compat)
 		if !route.reasoning.Disabled {
 			writeDSHReasoningEfforts(out, route.reasoning.EffortsMapping)
 		}
 	}
+	return nil
 }
 
 func writeDSHCompat(out *strings.Builder, compat map[string]bool) {
 	if len(compat) == 0 {
 		return
 	}
-	fmt.Fprintln(out, "          compat:")
+	fmt.Fprintln(out, "            compat:")
 	keys := make([]string, 0, len(compat))
 	for key := range compat {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		fmt.Fprintf(out, "            %s: %t\n", key, compat[key])
+		fmt.Fprintf(out, "              %s: %t\n", key, compat[key])
 	}
 }
 
@@ -646,7 +682,7 @@ func writeDSHReasoningEfforts(out *strings.Builder, efforts map[string]*string) 
 	if len(efforts) == 0 {
 		return
 	}
-	fmt.Fprintln(out, "          reasoningEfforts:")
+	fmt.Fprintln(out, "            reasoningEfforts:")
 	keys := make([]string, 0, len(efforts))
 	for key := range efforts {
 		keys = append(keys, key)
@@ -655,10 +691,10 @@ func writeDSHReasoningEfforts(out *strings.Builder, efforts map[string]*string) 
 	for _, key := range keys {
 		value := efforts[key]
 		if value == nil {
-			fmt.Fprintf(out, "            %s:\n", key)
+			fmt.Fprintf(out, "              %s:\n", key)
 			continue
 		}
-		fmt.Fprintf(out, "            %s: %s\n", key, *value)
+		fmt.Fprintf(out, "              %s: %s\n", key, *value)
 	}
 }
 

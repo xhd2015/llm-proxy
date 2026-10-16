@@ -34,7 +34,7 @@ func Assert(t *testing.T, d *session.Doctest, req *Request, resp *Response, err 
 	if !strings.HasPrefix(resp.After, fileWithoutBlock) {
 		t.Fatalf("existing content was rewritten:\n%s", resp.After)
 	}
-	if !strings.Contains(resp.After, "\n\n"+providersKey+":") {
+	if !strings.Contains(resp.After, "\n\n"+"- id: "+providersKey) {
 		t.Fatalf("the appended block needs a blank separator:\n%s", resp.After)
 	}
 	if !hasProvider(resp.After, "llm-proxy-new") {

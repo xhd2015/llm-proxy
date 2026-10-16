@@ -11,85 +11,94 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// syncTestSettings is a settings.yaml with content on both sides of the block
+// syncTestSettings is a cordis.patch.yml with content on both sides of the block
 // the DSH preview owns, so a save that is too greedy shows up immediately.
-const syncTestSettings = `ui-onboarding:
-  welcomeNoticeVersion: 2026-08-13.1
+const syncTestSettings = `- id: ui-onboarding
+  config:
+    welcomeNoticeVersion: 2026-08-13.1
 
-llm-proxy-providers:
-  providers:
-    llm-proxy-codex:
-      displayName: Codex (llm-proxy)
-      apiKeyEnv: CODEX_API_KEY
-      api: openai-responses
-      baseURL: http://127.0.0.1:8890/v1
-      models:
-        - id: gpt-5.6-luna
-          name: GPT-5.6 Luna
-        - id: gpt-5.6-terra
-          name: GPT-5.6 Terra
-    llm-proxy-old:
-      displayName: Old (llm-proxy)
-      apiKeyEnv: OLD_API_KEY
-      api: anthropic-messages
-      baseURL: http://127.0.0.1:8890
-      models:
-        - id: legacy-one
-          name: Legacy One
+- id: llm-pi-ai
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  config:
+    providers:
+      llm-proxy-codex:
+        displayName: Codex (llm-proxy)
+        apiKeyEnv: CODEX_API_KEY
+        api: openai-responses
+        baseURL: http://127.0.0.1:8890/v1
+        models:
+          - id: gpt-5.6-luna
+            name: GPT-5.6 Luna
+          - id: gpt-5.6-terra
+            name: GPT-5.6 Terra
+      llm-proxy-old:
+        displayName: Old (llm-proxy)
+        apiKeyEnv: OLD_API_KEY
+        api: anthropic-messages
+        baseURL: http://127.0.0.1:8890
+        models:
+          - id: legacy-one
+            name: Legacy One
 
-agent-default-model:
-  provider: llm-proxy-commandcode
-  model: deepseek/deepseek-v4.1-flash-from-dsh
-  reasoningEffort: max
-llm-deepseek:
-  models:
-    - id: deepseek-v4-flash
-      name: DeepSeek-V4-Flash
-permission:
-  defaultPreset: danger-full-access
-agent-presets:
-  default: std-no-subagent
+- id: agent-default-model
+  config:
+    provider: llm-proxy-commandcode
+    model: deepseek/deepseek-v4.1-flash-from-dsh
+    reasoningEffort: max
+- id: llm-deepseek
+  config:
+    models:
+      - id: deepseek-v4-flash
+        name: DeepSeek-V4-Flash
+- id: permission
+  config:
+    defaultPreset: danger-full-access
+- id: agent-presets
+  config:
+    default: std-no-subagent
 `
 
 // syncTestPreview is the generated DSH export: the AIS provider split into a
 // protocol-suffixed provider, a model added to Codex, and llm-proxy-old gone.
 const syncTestPreview = `# Store a non-empty placeholder for each apiKeyEnv in DSH credentials or the environment.
-llm-proxy-providers:
-  providers:
-    llm-proxy-ais-anthropic-messages:
-      displayName: AIS (llm-proxy)
-      apiKeyEnv: AIS_API_KEY
-      api: anthropic-messages
-      baseURL: http://127.0.0.1:8890
-      models:
-        - id: ais-glm-5-2
-          name: AIS - GLM-5.2
-    llm-proxy-codex:
-      displayName: Codex (llm-proxy)
-      apiKeyEnv: CODEX_API_KEY
-      api: openai-responses
-      baseURL: http://127.0.0.1:8890/v1
-      models:
-        - id: gpt-5.6-luna
-          name: GPT-5.6 Luna
-        - id: gpt-5.6-terra
-          name: GPT-5.6 Terra
-        - id: gpt-6-astra
-          name: GPT-6 Astra
+- id: llm-pi-ai
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  config:
+    providers:
+      llm-proxy-ais-anthropic-messages:
+        displayName: AIS (llm-proxy)
+        apiKeyEnv: AIS_API_KEY
+        api: anthropic-messages
+        baseURL: http://127.0.0.1:8890
+        models:
+          - id: ais-glm-5-2
+            name: AIS - GLM-5.2
+      llm-proxy-codex:
+        displayName: Codex (llm-proxy)
+        apiKeyEnv: CODEX_API_KEY
+        api: openai-responses
+        baseURL: http://127.0.0.1:8890/v1
+        models:
+          - id: gpt-5.6-luna
+            name: GPT-5.6 Luna
+          - id: gpt-5.6-terra
+            name: GPT-5.6 Terra
+          - id: gpt-6-astra
+            name: GPT-6 Astra
 `
 
 // syncTestBlock is the preview reduced to the block the editor writes.
 func syncTestBlock() string { return previewFragmentRegion(syncTestPreview, configWebDSHFragmentKey) }
 
 // syncTestHome redirects both runner target resolvers at a temp home so no test
-// reads or writes the developer's real settings.yaml. Tests using it must not
+// reads or writes the developer's real cordis.patch.yml. Tests using it must not
 // run in parallel: it overrides package-level resolvers.
 func syncTestHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	origCatalog, origDSH, origGrok := codexCatalogTargetPathFn, configWebDSHSettingsPathFn, configWebGrokConfigPathFn
 	codexCatalogTargetPathFn = func() string { return filepath.Join(home, ".codex", configModelsCatalogFileName) }
-	configWebDSHSettingsPathFn = func() string { return filepath.Join(home, ".dsh", "settings.yaml") }
+	configWebDSHSettingsPathFn = func() string { return filepath.Join(home, ".dsh", "profiles", "web", "cordis.patch.yml") }
 	configWebGrokConfigPathFn = func() string { return filepath.Join(home, ".grok", "config.toml") }
 	t.Cleanup(func() {
 		codexCatalogTargetPathFn, configWebDSHSettingsPathFn, configWebGrokConfigPathFn = origCatalog, origDSH, origGrok
@@ -99,7 +108,7 @@ func syncTestHome(t *testing.T) string {
 
 func syncTestWriteSettings(t *testing.T, home, text string) string {
 	t.Helper()
-	path := filepath.Join(home, ".dsh", "settings.yaml")
+	path := filepath.Join(home, ".dsh", "profiles", "web", "cordis.patch.yml")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +120,7 @@ func syncTestWriteSettings(t *testing.T, home, text string) string {
 
 func syncTestTarget(t *testing.T, home string) previewSyncTarget {
 	t.Helper()
-	return previewSyncTarget{Path: filepath.Join(home, ".dsh", "settings.yaml"), Key: configWebDSHFragmentKey, Locked: true}
+	return previewSyncTarget{Path: filepath.Join(home, ".dsh", "profiles", "web", "cordis.patch.yml"), Key: configWebDSHFragmentKey, LockFile: filepath.Join(home, ".dsh", "profiles", "web", "package.json")}
 }
 
 // syncTestSave runs one save against the temp runner file.
@@ -121,12 +130,16 @@ func syncTestSave(t *testing.T, home, hash, region string, dryRun bool) (string,
 }
 
 // syncTestDecode returns the decoded document, for asserting that unrelated
-// top-level keys survived a save untouched.
+// neighbouring entries survived a save untouched.
 func syncTestDecode(t *testing.T, text string) map[string]any {
 	t.Helper()
-	var value map[string]any
-	if err := yaml.Unmarshal([]byte(text), &value); err != nil {
+	var rows []map[string]any
+	if err := yaml.Unmarshal([]byte(text), &rows); err != nil {
 		t.Fatalf("result does not parse: %v\n%s", err, text)
+	}
+	value := make(map[string]any)
+	for _, row := range rows {
+		value[row["id"].(string)] = row["config"]
 	}
 	return value
 }
@@ -150,7 +163,7 @@ func syncTestProviders(t *testing.T, text string) map[string]any {
 func syncTestDiskRegion(t *testing.T, text string) string {
 	t.Helper()
 	lines, _ := splitFileLines(text)
-	span, ok := yamlKeyBlockSpan(lines, configWebDSHFragmentKey)
+	span, ok, _ := cordisEntrySpan(lines, configWebDSHFragmentKey)
 	if !ok {
 		t.Fatalf("no %s block in fixture", configWebDSHFragmentKey)
 	}
@@ -163,7 +176,7 @@ func syncTestEdit(region, provider, replacement string) string {
 	lines := regionLines(region)
 	start := -1
 	for i, line := range lines {
-		if strings.HasPrefix(line, "    "+provider+":") {
+		if strings.HasPrefix(line, "      "+provider+":") {
 			start = i
 			break
 		}
@@ -173,7 +186,7 @@ func syncTestEdit(region, provider, replacement string) string {
 	}
 	end := len(lines)
 	for i := start + 1; i < len(lines); i++ {
-		if len(lines[i]) > 4 && strings.HasPrefix(lines[i], "    ") && !strings.HasPrefix(lines[i], "     ") {
+		if len(lines[i]) > 6 && strings.HasPrefix(lines[i], "      ") && !strings.HasPrefix(lines[i], "       ") {
 			end = i
 			break
 		}
@@ -187,14 +200,14 @@ func syncTestEdit(region, provider, replacement string) string {
 func TestConfigWebSyncRegionSpan(t *testing.T) {
 	t.Parallel()
 	text, _ := splitFileLines(syncTestSettings)
-	span, ok := yamlKeyBlockSpan(text, configWebDSHFragmentKey)
+	span, ok, _ := cordisEntrySpan(text, configWebDSHFragmentKey)
 	if !ok {
 		t.Fatal("block not located")
 	}
-	// The span must run from the key line to the last provider line: the blank
-	// separator and every later top-level key stay outside it.
-	wantStart := strings.Count(syncTestSettings[:strings.Index(syncTestSettings, configWebDSHFragmentKey+":")], "\n") + 1
-	wantEnd := strings.Count(syncTestSettings[:strings.Index(syncTestSettings, "\nagent-default-model:")], "\n")
+	// The span must run from the entry line to the last provider line: the blank
+	// separator and every later top-level entry stay outside it.
+	wantStart := strings.Count(syncTestSettings[:strings.Index(syncTestSettings, "- id: "+configWebDSHFragmentKey)], "\n") + 1
+	wantEnd := strings.Count(syncTestSettings[:strings.Index(syncTestSettings, "\n- id: agent-default-model")], "\n")
 	if span.Start != wantStart || span.End != wantEnd {
 		t.Fatalf("span = %+v, want %d..%d", span, wantStart, wantEnd)
 	}
@@ -204,11 +217,11 @@ func TestConfigWebSyncRegionSpan(t *testing.T) {
 			t.Fatalf("region leaked %s:\n%s", foreign, region)
 		}
 	}
-	if !strings.HasPrefix(region, configWebDSHFragmentKey+":") || !strings.HasSuffix(region, "\n") || strings.HasSuffix(region, "\n\n") {
+	if !strings.HasPrefix(region, "- id: "+configWebDSHFragmentKey) || !strings.HasSuffix(region, "\n") || strings.HasSuffix(region, "\n\n") {
 		t.Fatalf("region must be the block itself, newline-terminated:\n%q", region)
 	}
 	// A prefix-sharing key must not be mistaken for the block.
-	if _, ok := yamlKeyBlockSpan([]string{configWebDSHFragmentKey + "-extra:", "  providers: {}"}, configWebDSHFragmentKey); ok {
+	if _, ok, _ := cordisEntrySpan([]string{"- id: " + configWebDSHFragmentKey + "-extra", "  config:", "    providers: {}"}, configWebDSHFragmentKey); ok {
 		t.Fatal("a longer key matched the block prefix")
 	}
 }
@@ -216,7 +229,7 @@ func TestConfigWebSyncRegionSpan(t *testing.T) {
 func TestConfigWebSyncPreviewReduction(t *testing.T) {
 	t.Parallel()
 	block := syncTestBlock()
-	if !strings.HasPrefix(block, configWebDSHFragmentKey+":") {
+	if !strings.HasPrefix(block, "- id: "+configWebDSHFragmentKey) {
 		t.Fatalf("block must start at the owned key:\n%s", block)
 	}
 	if strings.Contains(block, "# Store a non-empty placeholder") {
@@ -235,7 +248,7 @@ func TestConfigWebSyncTargetUpdate(t *testing.T) {
 	if state != configWebTargetDiffer || hash == "" || changes == 0 {
 		t.Fatalf("state=%q hash=%q changes=%d", state, hash, changes)
 	}
-	if note != "" || !strings.HasPrefix(region, configWebDSHFragmentKey+":") {
+	if note != "" || !strings.HasPrefix(region, "- id: "+configWebDSHFragmentKey) {
 		t.Fatalf("note=%q region=%q", note, region)
 	}
 	if state, _, _, _, changes = syncTargetPreviewUpdate(syncTestTarget(t, home), syncTestSettings); state != configWebTargetSame || changes != 0 {
@@ -254,15 +267,15 @@ func TestConfigWebSyncSaveEditedBlock(t *testing.T) {
 	hash := configWebRevision([]byte(syncTestSettings))
 
 	// The reader edits the right pane, which is seeded from the file on disk.
-	edited := syncTestEdit(syncTestDiskRegion(t, syncTestSettings), "llm-proxy-codex", `    llm-proxy-codex:
-      displayName: Codex (llm-proxy)
-      apiKeyEnv: CODEX_API_KEY
-      api: openai-responses
-      baseURL: http://127.0.0.1:8890/v1
-      models:
-        - id: gpt-6.1-sol
-          name: GPT-6.1 Sol
-      placeholder: added-by-hand
+	edited := syncTestEdit(syncTestDiskRegion(t, syncTestSettings), "llm-proxy-codex", `      llm-proxy-codex:
+        displayName: Codex (llm-proxy)
+        apiKeyEnv: CODEX_API_KEY
+        api: openai-responses
+        baseURL: http://127.0.0.1:8890/v1
+        models:
+          - id: gpt-6.1-sol
+            name: GPT-6.1 Sol
+        placeholder: added-by-hand
 `)
 	result, backup, _, err := syncTestSave(t, home, hash, edited, false)
 	if err != nil {
@@ -291,7 +304,7 @@ func TestConfigWebSyncSaveEditedBlock(t *testing.T) {
 			continue
 		}
 		if !reflect.DeepEqual(after[key], want) {
-			t.Fatalf("top-level key %s changed:\n%v\n%v", key, after[key], want)
+			t.Fatalf("neighbouring entry %s changed:\n%v\n%v", key, after[key], want)
 		}
 	}
 	saved, err := os.ReadFile(backup)
@@ -307,7 +320,7 @@ func TestConfigWebSyncSaveEditedBlock(t *testing.T) {
 	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("target mode = %v, %v", info.Mode().Perm(), err)
 	}
-	if _, err := os.Stat(path + ".lock"); err == nil {
+	if _, err := os.Stat(filepath.Join(filepath.Dir(path), "package.json.lock")); err == nil {
 		t.Fatal("lock left behind")
 	}
 	// Saving the same text again is a no-op with no second backup.
@@ -329,7 +342,7 @@ func TestConfigWebSyncSaveRejectsEmptyAndInvalidBlocks(t *testing.T) {
 		t.Fatalf("empty block err = %v", err)
 	}
 	// An edit that would not parse is refused before it reaches the file.
-	if _, _, _, err := syncTestSave(t, home, hash, configWebDSHFragmentKey+":\n  providers:\n    a:\n\t- bad\n", false); err == nil || !strings.Contains(err.Error(), "parse") {
+	if _, _, _, err := syncTestSave(t, home, hash, "- id: "+configWebDSHFragmentKey+"\n  config:\n    providers:\n      a:\n\t- bad\n", false); err == nil || !strings.Contains(err.Error(), "parse") {
 		t.Fatalf("tab-indented block err = %v", err)
 	}
 	// A paste that drops the owned key is refused rather than widening the write.
@@ -353,7 +366,7 @@ func TestConfigWebSyncSaveKeepsPastedNeighboursOut(t *testing.T) {
 	hash := configWebRevision([]byte(syncTestSettings))
 	// A reader who pastes the whole document into the pane: only the owned
 	// block may be written.
-	pasted := "ui-onboarding:\n  welcomeNoticeVersion: 9999\n\n" + syncTestBlock() + "\npermission:\n  defaultPreset: read-only\n"
+	pasted := "- id: ui-onboarding\n  config:\n    welcomeNoticeVersion: 9999\n\n" + syncTestBlock() + "\n- id: permission\n  config:\n    defaultPreset: read-only\n"
 	if _, _, _, err := syncTestSave(t, home, hash, pasted, false); err != nil {
 		t.Fatal(err)
 	}
@@ -371,7 +384,7 @@ func TestConfigWebSyncSaveKeepsPastedNeighboursOut(t *testing.T) {
 func TestConfigWebSyncAppendsMissingBlock(t *testing.T) {
 	// Non-parallel: overrides the package-level target resolvers.
 	home := syncTestHome(t)
-	without := "ui-onboarding:\n  welcomeNoticeVersion: 1\n\npermission:\n  defaultPreset: danger-full-access\n"
+	without := "- id: ui-onboarding\n  config:\n    welcomeNoticeVersion: 1\n\n- id: permission\n  config:\n    defaultPreset: danger-full-access\n"
 	path := syncTestWriteSettings(t, home, without)
 	target := syncTestTarget(t, home)
 	state, region, hash, note, changes := syncTargetPreviewUpdate(target, syncTestPreview)
@@ -390,7 +403,7 @@ func TestConfigWebSyncAppendsMissingBlock(t *testing.T) {
 	if !strings.HasPrefix(text, without) {
 		t.Fatalf("existing content was rewritten:\n%s", text)
 	}
-	if !strings.Contains(text, "\n\n"+configWebDSHFragmentKey+":") {
+	if !strings.Contains(text, "\n\n"+"- id: "+configWebDSHFragmentKey) {
 		t.Fatalf("block must be separated by a blank line:\n%s", text)
 	}
 	if got := len(syncTestProviders(t, text)); got != 2 {
@@ -434,7 +447,7 @@ func TestConfigWebSyncConflictAndLock(t *testing.T) {
 	}
 	// A lock held by another writer fails the save instead of racing it, and an
 	// existing lock is never removed: its owner is the only one who may.
-	lock := path + ".lock"
+	lock := filepath.Join(filepath.Dir(path), "package.json.lock")
 	if err := os.WriteFile(lock, []byte("4242\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -497,11 +510,11 @@ func TestConfigWebSyncPathResolution(t *testing.T) {
 	if err != nil {
 		t.Skip("no home directory")
 	}
-	if got, want := configWebDSHSettingsPath(), filepath.Join(home, ".dsh", "settings.yaml"); got != want {
+	if got, want := configWebDSHSettingsPath(), filepath.Join(home, ".dsh", "profiles", "web", "cordis.patch.yml"); got != want {
 		t.Fatalf("blank DSH_HOME resolved to %q, want %q", got, want)
 	}
 	t.Setenv("DSH_HOME", filepath.Join(home, "custom-dsh"))
-	if got, want := configWebDSHSettingsPath(), filepath.Join(home, "custom-dsh", "settings.yaml"); got != want {
+	if got, want := configWebDSHSettingsPath(), filepath.Join(home, "custom-dsh", "profiles", "web", "cordis.patch.yml"); got != want {
 		t.Fatalf("DSH_HOME resolved to %q, want %q", got, want)
 	}
 }
@@ -529,7 +542,7 @@ func TestConfigWebSyncEndpoint(t *testing.T) {
 	if diffValue.Target.TargetKind != configWebTargetFragment || diffValue.Target.TargetPath == "" {
 		t.Fatalf("target = %+v", diffValue.Target)
 	}
-	if !strings.HasPrefix(diffValue.Preview, configWebDSHFragmentKey+":") || diffValue.Disk != "" {
+	if !strings.HasPrefix(diffValue.Preview, "- id: "+configWebDSHFragmentKey) || diffValue.Disk != "" {
 		t.Fatalf("panes = preview %q disk %q", diffValue.Preview, diffValue.Disk)
 	}
 	if strings.Contains(diff.Body.String(), `"units"`) {
@@ -560,6 +573,19 @@ func TestConfigWebSyncEndpoint(t *testing.T) {
 	if syncValue.Result != "updated" || syncValue.Path != path || syncValue.Backup == "" {
 		t.Fatalf("save response = %+v", syncValue)
 	}
+	pasted := syncTestBlock() + "\n- id: permission\n  config:\n    defaultPreset: read-only\n"
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pastedResponse := webTestRequest(handler, "POST", "/api/sync", body(`,"hash":"`+configWebRevision(written)+`","region":`+strconvQuote(pasted)))
+	var pastedValue struct {
+		Result         string `json:"result"`
+		IgnoredOutside bool   `json:"ignoredOutside"`
+	}
+	if pastedResponse.Code != 200 || json.Unmarshal(pastedResponse.Body.Bytes(), &pastedValue) != nil || pastedValue.Result != "unchanged" || !pastedValue.IgnoredOutside {
+		t.Fatalf("pasted neighbour report = %d %s", pastedResponse.Code, pastedResponse.Body.String())
+	}
 	if got := webTestRequest(handler, "POST", "/api/sync", body(`,"hash":"stale","region":""`)); got.Code != 409 {
 		t.Fatalf("stale hash status = %d", got.Code)
 	}
@@ -569,6 +595,95 @@ func TestConfigWebSyncEndpoint(t *testing.T) {
 	}
 	if got := webTestRequest(handler, "POST", "/api/sync", `{"text":"{","file":"llm-proxy-dsh.yaml"}`); got.Code != 422 {
 		t.Fatalf("invalid draft status = %d", got.Code)
+	}
+}
+
+func TestConfigWebSyncEmptyPatch(t *testing.T) {
+	home := syncTestHome(t)
+	for _, original := range []string{"[]\n", "# Local preferences\n[]\n"} {
+		path := syncTestWriteSettings(t, home, original)
+		_, _, _, err := syncTestSave(t, home, configWebRevision([]byte(original)), syncTestBlock(), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		written, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateSyncedFragment(string(written), configWebDSHFragmentKey); err != nil {
+			t.Fatal(err)
+		}
+		if strings.HasPrefix(original, "#") && !strings.HasPrefix(string(written), "# Local preferences\n") {
+			t.Fatal("the patch header changed")
+		}
+	}
+}
+
+func TestConfigWebSyncPreservesCordisExpressions(t *testing.T) {
+	home := syncTestHome(t)
+	head := "- id: permission\n  config:\n    defaultPreset: !!js process.env.MY_PERMISSION\n\n"
+	entry := "- name: '@deepseek-ai/dsh-llm-pi-ai'\n  config:\n    providers: {}\n  id: llm-pi-ai\n"
+	tail := "\n# Keep the next declaration\n- insert:\n    - id: preset-local\n      name: '@deepseek-ai/dsh-agent-preset'\n      config:\n        id: local\n        plugins: []\n"
+	text := head + entry + tail
+	path := syncTestWriteSettings(t, home, text)
+	_, _, _, err := syncTestSave(t, home, configWebRevision([]byte(text)), syncTestBlock(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(written) != head+syncTestBlock()+tail {
+		t.Fatalf("neighbouring expressions or comments changed:\n%s", written)
+	}
+}
+
+func TestConfigWebSyncRejectsAmbiguousPatches(t *testing.T) {
+	home := syncTestHome(t)
+	for name, region := range map[string]string{
+		"duplicate entry":    syncTestBlock() + syncTestBlock(),
+		"multiple documents": syncTestBlock() + "---\n- id: unrelated\n",
+		"wrong plugin":       strings.Replace(syncTestBlock(), "@deepseek-ai/dsh-llm-pi-ai", "@local/another-plugin", 1),
+		"missing providers":  "- id: llm-pi-ai\n  name: '@deepseek-ai/dsh-llm-pi-ai'\n  config: {}\n",
+		"duplicate key":      syncTestBlock() + "  id: other\n",
+		"insert operation":   syncTestBlock() + "  insert: []\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := syncTestWriteSettings(t, home, syncTestSettings)
+			_, backup, _, err := syncTestSave(t, home, configWebRevision([]byte(syncTestSettings)), region, false)
+			if err == nil || backup != "" {
+				t.Fatalf("invalid patch was saved: backup=%q err=%v", backup, err)
+			}
+			written, err := os.ReadFile(path)
+			if err != nil || string(written) != syncTestSettings {
+				t.Fatalf("rejected save changed the file: %v", err)
+			}
+		})
+	}
+	path := syncTestWriteSettings(t, home, syncTestSettings+syncTestBlock())
+	state, _, _, _, _ := syncTargetPreviewUpdate(syncTestTarget(t, home), syncTestPreview)
+	if state != configWebTargetUnreadable {
+		t.Fatalf("ambiguous disk patch state = %s", state)
+	}
+	_, _, _, err := syncTestSave(t, home, configWebRevision([]byte(syncTestSettings+syncTestBlock())), syncTestBlock(), false)
+	if err == nil {
+		t.Fatalf("duplicate entry on disk was overwritten: %s", path)
+	}
+}
+
+func TestConfigWebSyncRefusesDeletedFile(t *testing.T) {
+	home := syncTestHome(t)
+	path := syncTestWriteSettings(t, home, syncTestSettings)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, err := syncTestSave(t, home, configWebRevision([]byte(syncTestSettings)), syncTestBlock(), false)
+	if err != errConfigWebChanged {
+		t.Fatalf("deleted-file revision was accepted: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("deleted file was recreated: %v", err)
 	}
 }
 

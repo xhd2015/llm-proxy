@@ -3,15 +3,15 @@
 **Feature**: the fragment engine diffs the block a runner-file preview owns and writes a reader-edited block back into exactly that block.
 
 ```
-# settings.yaml + preview -> locate the block -> compare lines -> reduce the edited region -> splice -> backup + write
-settings.yaml, preview, region -> configWebSync -> state, changes -> save(region) -> updated file
+# cordis.patch.yml + preview -> locate the block -> compare lines -> reduce the edited region -> splice -> backup + write
+cordis.patch.yml, preview, region -> configWebSync -> state, changes -> save(region) -> updated file
 ```
 
 ## Preconditions
 
 - Each leaf builds its runner file under `t.TempDir()`; paths are absolute and no
   leaf uses `os.Chdir` or `t.Setenv`.
-- The file is a `settings.yaml`-shaped document: neighbours the editor does not
+- The file is a `cordis.patch.yml`-shaped document: neighbours the editor does not
   own (`ui-onboarding` above the block, `permission` below it) exist so a greedy
   splice fails loudly.
 - The preview carries a leading comment, which is preview-side prose and must
@@ -33,7 +33,7 @@ settings.yaml, preview, region -> configWebSync -> state, changes -> save(region
 
 ## Context
 
-- The block spans its column-0 key to the line before the next column-0 key; the
+- The block spans its top-level entry to the line before the next top-level entry; the
   blank separator after it stays outside.
 - The submitted region is reduced to the block, so a paste of the whole document
   still writes only the block.
@@ -52,60 +52,70 @@ import (
 	openai "github.com/xhd2015/llm-proxy/open_ai"
 )
 
-// providersKey is the settings key the DSH preview owns.
-const providersKey = "llm-proxy-providers"
+// providersKey is the Loader entry id the DSH preview owns.
+const providersKey = "llm-pi-ai"
 
 // settingsText is a runner file with content on both sides of the owned block.
-const settingsText = `ui-onboarding:
-  welcomeNoticeVersion: 2026-08-13.1
+const settingsText = `- id: ui-onboarding
+  config:
+    welcomeNoticeVersion: 2026-08-13.1
 
-llm-proxy-providers:
-  providers:
-    llm-proxy-codex:
-      displayName: Codex (llm-proxy)
-      models:
-        - id: gpt-5.6-luna
-          name: GPT-5.6 Luna
-    llm-proxy-old:
-      displayName: Old (llm-proxy)
-      models:
-        - id: legacy-one
-          name: Legacy One
+- id: llm-pi-ai
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  config:
+    providers:
+      llm-proxy-codex:
+        displayName: Codex (llm-proxy)
+        models:
+          - id: gpt-5.6-luna
+            name: GPT-5.6 Luna
+      llm-proxy-old:
+        displayName: Old (llm-proxy)
+        models:
+          - id: legacy-one
+            name: Legacy One
 
-permission:
-  defaultPreset: danger-full-access
+- id: permission
+  config:
+    defaultPreset: danger-full-access
 `
 
 // previewText adds a model to Codex and drops llm-proxy-old.
 const previewText = `# Store a non-empty placeholder for each apiKeyEnv in DSH credentials or the environment.
-llm-proxy-providers:
-  providers:
-    llm-proxy-codex:
-      displayName: Codex (llm-proxy)
-      models:
-        - id: gpt-5.6-luna
-          name: GPT-5.6 Luna
-        - id: gpt-6-astra
-          name: GPT-6 Astra
+- id: llm-pi-ai
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  config:
+    providers:
+      llm-proxy-codex:
+        displayName: Codex (llm-proxy)
+        models:
+          - id: gpt-5.6-luna
+            name: GPT-5.6 Luna
+          - id: gpt-6-astra
+            name: GPT-6 Astra
 `
 
 // previewWithoutBlock is a preview for a file that has no block yet.
 const previewWithoutBlock = `# Empty export.
-llm-proxy-providers:
-  providers:
-    llm-proxy-new:
-      displayName: New (llm-proxy)
-      models:
-        - id: new-one
-          name: New One
+- id: llm-pi-ai
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  config:
+    providers:
+      llm-proxy-new:
+        displayName: New (llm-proxy)
+        models:
+          - id: new-one
+            name: New One
 `
 
 // fileWithoutBlock is a runner file that has no owned block at all.
-const fileWithoutBlock = `ui-onboarding:
-  welcomeNoticeVersion: 2026-08-13.1
+const fileWithoutBlock = `- id: ui-onboarding
+  config:
+    welcomeNoticeVersion: 2026-08-13.1
 
-permission:
-  defaultPreset: danger-full-access
+- id: permission
+  config:
+    defaultPreset: danger-full-access
 `
 
 // Setup is a no-op: each leaf states its own file, preview, and region.
@@ -133,10 +143,10 @@ func assertErrContains(t *testing.T, err error, sub string) {
 	}
 }
 
-// writeSettings writes content to a fresh settings.yaml and returns its path.
+// writeSettings writes content to a fresh cordis.patch.yml and returns its path.
 func writeSettings(t *testing.T, content string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "settings.yaml")
+	path := filepath.Join(t.TempDir(), "cordis.patch.yml")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("write settings: %v", err)
 	}
@@ -175,7 +185,7 @@ func blockOf(t *testing.T, text string) string {
 	lines := strings.Split(text, "\n")
 	start := -1
 	for i, line := range lines {
-		if strings.HasPrefix(line, providersKey+":") {
+		if strings.HasPrefix(line, "- id: "+providersKey) {
 			start = i
 			break
 		}
@@ -199,12 +209,12 @@ func blockOf(t *testing.T, text string) string {
 }
 
 // aroundBlock splits text into the lines before the owned block and the lines
-// from the next top-level key onward. Both sides must survive a save.
+// from the next top-level entry onward. Both sides must survive a save.
 func aroundBlock(text string) (head, tail string) {
 	lines := strings.Split(text, "\n")
 	start, end := -1, -1
 	for i, line := range lines {
-		if start < 0 && strings.HasPrefix(line, providersKey+":") {
+		if start < 0 && strings.HasPrefix(line, "- id: "+providersKey) {
 			start = i
 			continue
 		}
@@ -225,7 +235,7 @@ func aroundBlock(text string) (head, tail string) {
 // hasProvider reports whether a provider block key is present.
 func hasProvider(text, name string) bool {
 	for _, line := range strings.Split(text, "\n") {
-		if strings.HasPrefix(line, "    "+name+":") {
+		if strings.HasPrefix(line, "      "+name+":") {
 			return true
 		}
 	}

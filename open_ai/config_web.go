@@ -378,7 +378,8 @@ func newConfigWebHandlerWithNative(store *configWebStore, host string, native *n
 				http.Error(w, err.Error(), status)
 				return
 			}
-			response := map[string]any{"path": target.Path, "result": result, "backup": backup}
+			ignoredOutside := strings.TrimSpace(draft.Region) != strings.TrimSpace(target.previewRegion(draft.Region))
+			response := map[string]any{"path": target.Path, "result": result, "backup": backup, "ignoredOutside": ignoredOutside}
 			if draft.DryRun {
 				response["content"] = content
 			}

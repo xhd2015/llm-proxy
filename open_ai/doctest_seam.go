@@ -1,5 +1,7 @@
 package openai
 
+import "path/filepath"
+
 // This file provides exported testability seams for the doctest harness
 // (see open_ai/tests/codex-sse-patch, codex-request-transform, codex-auth).
 //
@@ -76,7 +78,7 @@ func ConfigWebSyncDiff(path, key, preview string) ConfigWebSyncDiffResult {
 // harness can exercise the submitted text, conflict detection, locking, and the
 // backup. The target behaves like the DSH one: it participates in the lock.
 func ConfigWebSaveRegion(path, key, preview, hash, region string, dryRun bool) (ConfigWebSaveResult, error) {
-	result, backup, content, err := saveConfigWebFragment(previewSyncTarget{Path: path, Key: key, Locked: true}, preview, hash, region, dryRun)
+	result, backup, content, err := saveConfigWebFragment(previewSyncTarget{Path: path, Key: key, LockFile: filepath.Join(filepath.Dir(path), "package.json")}, preview, hash, region, dryRun)
 	if err != nil {
 		return ConfigWebSaveResult{}, err
 	}

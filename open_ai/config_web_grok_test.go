@@ -149,7 +149,7 @@ func TestConfigWebGrokTargetIsCompareOnly(t *testing.T) {
 	if target.Format != configWebFormatTOML || target.Key != configWebGrokModelPrefix {
 		t.Fatalf("target = %+v", target)
 	}
-	if target.Editable || target.Locked {
+	if target.Editable || target.LockFile != "" {
 		t.Fatalf("the grok target must be compare-only and unlocked: %+v", target)
 	}
 	if !strings.HasSuffix(target.Path, filepath.Join("", "config.toml")) {
