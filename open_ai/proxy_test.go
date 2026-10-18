@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -60,6 +62,70 @@ func TestProxyStaticAuthorizationReplacesIncomingHeader(t *testing.T) {
 	}
 	if gotPath != "/v1/messages" {
 		t.Fatalf("path = %q, want /v1/messages", gotPath)
+	}
+}
+
+func TestProxyTokenFileTrimsAndRotates(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token.txt")
+	if err := os.WriteFile(path, []byte("first\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	target, err := url.Parse(upstream.URL + "/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := newProxyWithOptions(target, nil, false, proxyOptions{stripPathPrefix: "/v1", authorizationFile: path})
+	req := httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer client-token")
+	rec := httptest.NewRecorder()
+	proxy.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+	if err := os.WriteFile(path, []byte("  second  \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/messages", nil)
+	rec = httptest.NewRecorder()
+	proxy.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("second status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+	if len(got) != 2 || got[0] != "Bearer first" || got[1] != "Bearer second" {
+		t.Fatalf("Authorization = %v, want Bearer first then Bearer second", got)
+	}
+}
+
+func TestProxyTokenFileMissingAndEmpty(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("upstream should not be called")
+	}))
+	defer upstream.Close()
+	target, err := url.Parse(upstream.URL + "/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing := newProxyWithOptions(target, nil, false, proxyOptions{authorizationFile: filepath.Join(t.TempDir(), "missing.txt")})
+	rec := httptest.NewRecorder()
+	missing.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/messages", nil))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("missing status = %d, want %d", rec.Code, http.StatusBadGateway)
+	}
+	emptyPath := filepath.Join(t.TempDir(), "empty.txt")
+	if err := os.WriteFile(emptyPath, []byte("\n  \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	empty := newProxyWithOptions(target, nil, false, proxyOptions{authorizationFile: emptyPath})
+	rec = httptest.NewRecorder()
+	empty.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/messages", nil))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("empty status = %d, want %d", rec.Code, http.StatusBadGateway)
 	}
 }
 

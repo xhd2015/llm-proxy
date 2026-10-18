@@ -38,7 +38,10 @@ Runner settings change only when you edit the on-disk side of a preview diff and
 press Save; each Save backs the runner file up first and leaves the rest of it
 alone. A runner file that changed since the diff was loaded refuses the Save.
 The Grok preview compares against ~/.grok/config.toml but never writes it: those
-model tables are shared with other tools. The running proxy is not reloaded.
+model tables are shared with other tools. The DSH preview warns when apiKeyEnv
+refs are missing from ~/.dsh/.credentials.yaml; Add placeholders writes
+PROXY_MANAGED for those refs only and never returns credential values.
+The running proxy is not reloaded.
 
 Options:
   --config FILE  configuration file to edit (must exist)
@@ -134,11 +137,12 @@ type configWebFile struct {
 }
 
 type configWebPreview struct {
-	Content  string                    `json:"content"`
-	Format   string                    `json:"format"`
-	Error    string                    `json:"error,omitempty"`
-	Files    []configWebFile           `json:"files,omitempty"`
-	Warnings []configWebPreviewWarning `json:"warnings,omitempty"`
+	Content     string                    `json:"content"`
+	Format      string                    `json:"format"`
+	Error       string                    `json:"error,omitempty"`
+	Files       []configWebFile           `json:"files,omitempty"`
+	Warnings    []configWebPreviewWarning `json:"warnings,omitempty"`
+	Credentials *configWebDSHCredentials  `json:"credentials,omitempty"`
 }
 
 type configWebPreviewWarning struct {
@@ -202,6 +206,14 @@ func inspectConfigWebDraft(text string, options configModelsOptions) configWebRe
 			} else {
 				preview.Content = content
 				preview.Files = []configWebFile{{Name: "llm-proxy-" + runner + "." + preview.Format, Format: preview.Format, Content: content}}
+				if runner == "dsh" {
+					preview.Credentials = inspectDSHCredentials(dshAPIKeyEnvs(routesForAgentRunner(routes, "dsh")))
+					if len(preview.Credentials.Missing) > 0 {
+						preview.Warnings = append(preview.Warnings, dshCredentialsWarning(preview.Credentials))
+					} else if preview.Credentials.Note != "" {
+						preview.Warnings = append(preview.Warnings, configWebPreviewWarning{Code: "dsh-credentials", Message: preview.Credentials.Note})
+					}
+				}
 				// These exports are regions of a runner file, not files, so the
 				// editor needs to know where the region lands and what it holds
 				// there before it can offer a diff. The DSH target is editable;
@@ -277,7 +289,7 @@ func newConfigWebHandlerWithNative(store *configWebStore, host string, native *n
 			writeConfigWebJSON(w, 200, map[string]any{"text": text, "revision": revision, "path": store.path, "report": inspectConfigWebDraft(text, options)})
 			return
 		}
-		if r.URL.Path != "/api/validate" && r.URL.Path != "/api/save" && r.URL.Path != "/api/catalog" && r.URL.Path != "/api/diff" && r.URL.Path != "/api/sync" {
+		if r.URL.Path != "/api/validate" && r.URL.Path != "/api/save" && r.URL.Path != "/api/catalog" && r.URL.Path != "/api/diff" && r.URL.Path != "/api/sync" && r.URL.Path != "/api/credentials" {
 			http.NotFound(w, r)
 			return
 		}
@@ -317,6 +329,21 @@ func newConfigWebHandlerWithNative(store *configWebStore, host string, native *n
 		}
 		if !report.Valid {
 			writeConfigWebJSON(w, 422, report)
+			return
+		}
+		if r.URL.Path == "/api/credentials" {
+			_, routes, _ := inspectProxyConfigBytes([]byte(draft.Text))
+			needed := dshAPIKeyEnvs(routesForAgentRunner(routes, "dsh"))
+			added, path, backup, result, err := addDSHCredentialPlaceholders(needed)
+			if err != nil {
+				status := 500
+				if errors.Is(err, errConfigWebNoRunnerHome) {
+					status = 409
+				}
+				http.Error(w, err.Error(), status)
+				return
+			}
+			writeConfigWebJSON(w, 200, map[string]any{"path": path, "added": added, "backup": backup, "result": result, "report": inspectConfigWebDraft(draft.Text, options)})
 			return
 		}
 		if r.URL.Path == "/api/catalog" {

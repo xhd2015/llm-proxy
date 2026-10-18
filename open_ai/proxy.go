@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -41,6 +42,7 @@ type proxyOptions struct {
 	feedToGrokCLI               bool
 	codexAuthFile               string
 	staticAuthorization         string
+	authorizationFile           string
 	modelCapabilities           map[string]ModelCapability
 }
 
@@ -71,6 +73,7 @@ func newProxyWithOptions(target *url.URL, modelMap map[string]string, verbose bo
 		codexTransform:          opts.codexTransform,
 		feedToGrokCLI:           opts.feedToGrokCLI,
 		codexAuthFile:           opts.codexAuthFile,
+		authorizationFile:       opts.authorizationFile,
 		modelCapabilities:       opts.modelCapabilities,
 		verbose:                 verbose,
 	}
@@ -113,6 +116,7 @@ type loggingTransport struct {
 	codexTransform          bool
 	feedToGrokCLI           bool
 	codexAuthFile           string
+	authorizationFile       string
 	modelCapabilities       map[string]ModelCapability
 	verbose                 bool
 	Transport               http.RoundTripper
@@ -129,6 +133,9 @@ func (c *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	c.logRequest(req, body)
 	sentBody := c.modifyRequestBody(req, body)
 	c.injectCodexAuth(req)
+	if err := c.injectHTTPProxyAuth(req); err != nil {
+		return nil, err
+	}
 	// Known before the response arrives: Codex requests are sent with stream:true.
 	// The response is forwarded live from that fact, not by sniffing the body.
 	streamed := c.codexTransform && jsonStreamEnabled(sentBody)
@@ -246,6 +253,34 @@ func (c *loggingTransport) injectCodexAuth(req *http.Request) {
 	if accountID != "" {
 		req.Header.Set("Chatgpt-Account-Id", accountID)
 	}
+}
+
+func (c *loggingTransport) injectHTTPProxyAuth(req *http.Request) error {
+	if c.authorizationFile == "" {
+		return nil
+	}
+	token, err := readHTTPProxyTokenFile(c.authorizationFile)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	return nil
+}
+
+func readHTTPProxyTokenFile(path string) (string, error) {
+	expanded, err := logutil.ExpandPath(path)
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(expanded)
+	if err != nil {
+		return "", err
+	}
+	token := strings.TrimSpace(string(data))
+	if token == "" {
+		return "", fmt.Errorf("%s is empty", expanded)
+	}
+	return token, nil
 }
 
 // maybeLogWebSocket wraps the upgraded response body so server/client frames

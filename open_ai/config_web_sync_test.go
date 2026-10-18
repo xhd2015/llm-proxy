@@ -501,6 +501,26 @@ func TestConfigWebSyncLineCounts(t *testing.T) {
 	if added, removed := lineDiffCounts(nil, regionLines("a\n")); added != 1 || removed != 0 {
 		t.Fatalf("from-empty counts = +%d -%d", added, removed)
 	}
+	identical := make([]string, 203)
+	for i := range identical {
+		identical[i] = "line"
+	}
+	if added, removed := lineDiffCounts(identical, identical); added != 0 || removed != 0 {
+		t.Fatalf("203 identical lines = +%d -%d, want 0 (must not trip the LCS budget)", added, removed)
+	}
+	larger := make([]string, 300)
+	copy(larger, identical)
+	for i := 203; i < len(larger); i++ {
+		larger[i] = "line"
+	}
+	if added, removed := lineDiffCounts(larger, larger); added != 0 || removed != 0 {
+		t.Fatalf("300 identical lines = +%d -%d", added, removed)
+	}
+	changed := append([]string{}, identical...)
+	changed[100] = "changed"
+	if added, removed := lineDiffCounts(identical, changed); added != 1 || removed != 1 {
+		t.Fatalf("one replaced line in 203 = +%d -%d, want +1 -1", added, removed)
+	}
 }
 
 func TestConfigWebSyncPathResolution(t *testing.T) {

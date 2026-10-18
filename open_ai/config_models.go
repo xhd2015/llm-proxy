@@ -590,6 +590,40 @@ func dshProviderDisplayName(provider configProvider) string {
 	}
 }
 
+// dshAPIKeyEnv is the credential reference exported for a configured provider
+// name: uppercase, punctuation to underscores, `_API_KEY` suffix. Names that
+// start with a digit get an `LLM_PROXY_` prefix so they remain env-safe.
+func dshAPIKeyEnv(providerName string) string {
+	credential := strings.Map(func(r rune) rune {
+		if r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			return r
+		}
+		return '_'
+	}, strings.ToUpper(providerName)) + "_API_KEY"
+	if credential[0] >= '0' && credential[0] <= '9' {
+		return "LLM_PROXY_" + credential
+	}
+	return credential
+}
+
+func dshAPIKeyEnvs(routes []effectiveRoute) []string {
+	seen := make(map[string]bool)
+	var names []string
+	for _, group := range groupDSHRoutes(routes) {
+		if len(group.routes) == 0 {
+			continue
+		}
+		name := dshAPIKeyEnv(group.routes[0].provider.Name)
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // dshYAMLScalar keeps labels and ids as strings without adding physical lines
 // that would escape their field's indentation.
 func dshYAMLScalar(value string) (string, error) {
@@ -615,16 +649,7 @@ func writeDSHProvider(out *strings.Builder, group dshProviderGroup, baseURL stri
 	}
 	fmt.Fprintf(out, "      %s:\n", key)
 	fmt.Fprintf(out, "        displayName: %s\n", display)
-	credential := strings.Map(func(r rune) rune {
-		if r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
-			return r
-		}
-		return '_'
-	}, strings.ToUpper(group.routes[0].provider.Name)) + "_API_KEY"
-	if credential[0] >= '0' && credential[0] <= '9' {
-		credential = "LLM_PROXY_" + credential
-	}
-	fmt.Fprintf(out, "        apiKeyEnv: %s\n", credential)
+	fmt.Fprintf(out, "        apiKeyEnv: %s\n", dshAPIKeyEnv(group.routes[0].provider.Name))
 	fmt.Fprintf(out, "        api: %s\n", group.protocol)
 	fmt.Fprintf(out, "        baseURL: %s\n", baseURL)
 	if group.reasoning != "" {

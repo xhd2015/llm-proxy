@@ -27,14 +27,28 @@ type proxyConfig struct {
 }
 
 type configProvider struct {
-	Name         string `json:"name"`
-	Kind         string `json:"kind"`
-	Subscription bool   `json:"subscription"`
-	Home         string `json:"home"`
-	AuthFile     string `json:"authFile"`
-	Version      string `json:"version"`
-	BaseURL      string `json:"baseUrl"`
-	DummyToken   string `json:"dummyToken"`
+	Name         string             `json:"name"`
+	Kind         string             `json:"kind"`
+	Subscription bool               `json:"subscription"`
+	Home         string             `json:"home"`
+	AuthFile     string             `json:"authFile"`
+	Version      string             `json:"version"`
+	BaseURL      string             `json:"baseUrl"`
+	Token        string             `json:"token"`
+	TokenFile    string             `json:"tokenFile"`
+	DummyToken   string             `json:"dummyToken"`
+	Credentials  []configCredential `json:"credentials"`
+}
+
+type configCredential struct {
+	Name       string `json:"name"`
+	Selected   bool   `json:"selected"`
+	Home       string `json:"home"`
+	AuthFile   string `json:"authFile"`
+	BaseURL    string `json:"baseUrl"`
+	Token      string `json:"token"`
+	TokenFile  string `json:"tokenFile"`
+	DummyToken string `json:"dummyToken"`
 }
 
 type configInput struct {
@@ -142,6 +156,7 @@ func inspectProxyConfigBytes(data []byte) (proxyConfig, []effectiveRoute, []conf
 			diagnostics = append(diagnostics, configDiagnostic{"error", path, detail})
 		}
 	}
+	diagnostics = append(diagnostics, credentialSelectionWarnings(config)...)
 	sort.SliceStable(diagnostics, func(i, j int) bool {
 		if diagnostics[i].path != diagnostics[j].path {
 			return diagnostics[i].path < diagnostics[j].path
@@ -156,6 +171,12 @@ func normalizeProxyConfig(config proxyConfig) proxyConfig {
 	for i := range config.Providers {
 		config.Providers[i].Home = pathfmt.Expand(config.Providers[i].Home)
 		config.Providers[i].AuthFile = pathfmt.Expand(config.Providers[i].AuthFile)
+		config.Providers[i].TokenFile = pathfmt.Expand(config.Providers[i].TokenFile)
+		for j := range config.Providers[i].Credentials {
+			config.Providers[i].Credentials[j].Home = pathfmt.Expand(config.Providers[i].Credentials[j].Home)
+			config.Providers[i].Credentials[j].AuthFile = pathfmt.Expand(config.Providers[i].Credentials[j].AuthFile)
+			config.Providers[i].Credentials[j].TokenFile = pathfmt.Expand(config.Providers[i].Credentials[j].TokenFile)
+		}
 	}
 	return config
 }
@@ -179,11 +200,37 @@ func validateProxyConfig(config proxyConfig) ([]effectiveRoute, error) {
 		if provider.Kind != "commandcode" && provider.Kind != "codex" && provider.Kind != "grok" && provider.Kind != "http-proxy" {
 			failures = append(failures, fmt.Errorf("%s: unsupported provider kind %q", where, provider.Kind))
 		}
-		if provider.DummyToken != "" && provider.Kind != "http-proxy" {
-			failures = append(failures, fmt.Errorf("%s: dummyToken is only supported by http-proxy providers", where))
+		if len(provider.Credentials) > 0 {
+			if legacy := providerLegacyAuthFields(provider); len(legacy) > 0 {
+				failures = append(failures, fmt.Errorf("%s: set credentials or legacy %s, not both", where, strings.Join(legacy, ", ")))
+			}
+			for j, cred := range provider.Credentials {
+				failures = append(failures, validateProviderCredential(provider.Kind, cred, fmt.Sprintf("%s.credentials[%d]", where, j))...)
+			}
+			applySelectedCredential(&provider)
+			config.Providers[i] = provider
 		}
-		if provider.Kind == "http-proxy" && strings.TrimSpace(provider.DummyToken) != provider.DummyToken {
-			failures = append(failures, fmt.Errorf("%s: dummyToken must not have surrounding whitespace", where))
+		authFields := httpProxyAuthFieldNames(provider)
+		if provider.Kind != "http-proxy" {
+			for _, name := range authFields {
+				failures = append(failures, fmt.Errorf("%s: %s is only supported by http-proxy providers", where, name))
+			}
+		} else {
+			if len(authFields) > 1 {
+				failures = append(failures, fmt.Errorf("%s: token, tokenFile, and dummyToken are mutually exclusive; set only one", where))
+			}
+			for _, field := range []struct {
+				name  string
+				value string
+			}{
+				{"token", provider.Token},
+				{"tokenFile", provider.TokenFile},
+				{"dummyToken", provider.DummyToken},
+			} {
+				if field.value != "" && strings.TrimSpace(field.value) != field.value {
+					failures = append(failures, fmt.Errorf("%s: %s must not have surrounding whitespace", where, field.name))
+				}
+			}
 		}
 		if !provider.Subscription && provider.BaseURL == "" {
 			failures = append(failures, fmt.Errorf("%s: baseUrl is required when subscription is false", where))
@@ -582,6 +629,123 @@ func bridgeDefaultMaxTokens(route effectiveRoute) int {
 	return 8192
 }
 
+func httpProxyAuthFieldNames(provider configProvider) []string {
+	var names []string
+	if provider.Token != "" {
+		names = append(names, "token")
+	}
+	if provider.TokenFile != "" {
+		names = append(names, "tokenFile")
+	}
+	if provider.DummyToken != "" {
+		names = append(names, "dummyToken")
+	}
+	return names
+}
+
+func httpProxyStaticToken(provider configProvider) string {
+	if provider.Token != "" {
+		return provider.Token
+	}
+	return provider.DummyToken
+}
+
+func providerLegacyAuthFields(provider configProvider) []string {
+	var names []string
+	for _, field := range []struct {
+		name  string
+		value string
+	}{
+		{"home", provider.Home},
+		{"authFile", provider.AuthFile},
+		{"baseUrl", provider.BaseURL},
+		{"token", provider.Token},
+		{"tokenFile", provider.TokenFile},
+		{"dummyToken", provider.DummyToken},
+	} {
+		if field.value != "" {
+			names = append(names, field.name)
+		}
+	}
+	return names
+}
+
+func applySelectedCredential(provider *configProvider) {
+	if len(provider.Credentials) == 0 {
+		return
+	}
+	idx := 0
+	for i, cred := range provider.Credentials {
+		if cred.Selected {
+			idx = i
+			break
+		}
+	}
+	cred := provider.Credentials[idx]
+	provider.Home = cred.Home
+	provider.AuthFile = cred.AuthFile
+	provider.BaseURL = cred.BaseURL
+	provider.Token = cred.Token
+	provider.TokenFile = cred.TokenFile
+	provider.DummyToken = cred.DummyToken
+}
+
+func validateProviderCredential(kind string, cred configCredential, where string) []error {
+	var failures []error
+	if cred.Home != "" && kind != "commandcode" && kind != "grok" {
+		failures = append(failures, fmt.Errorf("%s: home is only supported by commandcode and grok providers", where))
+	}
+	if cred.AuthFile != "" && kind != "codex" {
+		failures = append(failures, fmt.Errorf("%s: authFile is only supported by codex providers", where))
+	}
+	authFields := httpProxyAuthFieldNames(configProvider{Token: cred.Token, TokenFile: cred.TokenFile, DummyToken: cred.DummyToken})
+	if kind != "http-proxy" {
+		for _, name := range authFields {
+			failures = append(failures, fmt.Errorf("%s: %s is only supported by http-proxy providers", where, name))
+		}
+	} else if len(authFields) > 1 {
+		failures = append(failures, fmt.Errorf("%s: token, tokenFile, and dummyToken are mutually exclusive; set only one", where))
+	}
+	for _, field := range []struct {
+		name  string
+		value string
+	}{
+		{"token", cred.Token},
+		{"tokenFile", cred.TokenFile},
+		{"dummyToken", cred.DummyToken},
+	} {
+		if field.value != "" && strings.TrimSpace(field.value) != field.value {
+			failures = append(failures, fmt.Errorf("%s: %s must not have surrounding whitespace", where, field.name))
+		}
+	}
+	if cred.BaseURL != "" {
+		if _, err := url.ParseRequestURI(cred.BaseURL); err != nil {
+			failures = append(failures, fmt.Errorf("%s: invalid baseUrl: %w", where, err))
+		}
+	}
+	return failures
+}
+
+func credentialSelectionWarnings(config proxyConfig) []configDiagnostic {
+	var warnings []configDiagnostic
+	for i, provider := range config.Providers {
+		var selected []int
+		for j, cred := range provider.Credentials {
+			if cred.Selected {
+				selected = append(selected, j)
+			}
+		}
+		if len(selected) > 1 {
+			warnings = append(warnings, configDiagnostic{
+				"warning",
+				fmt.Sprintf("providers[%d].credentials[%d]", i, selected[0]),
+				fmt.Sprintf("extra selected ignored; using credentials[%d]", selected[0]),
+			})
+		}
+	}
+	return warnings
+}
+
 func buildProviderProtocolHandler(route effectiveRoute, endpoint string, logger *logutil.Logger) (http.Handler, error) {
 	provider := route.provider
 	switch provider.Kind {
@@ -610,7 +774,7 @@ func buildProviderProtocolHandler(route effectiveRoute, endpoint string, logger 
 		if err != nil {
 			return nil, err
 		}
-		return newProxyWithOptions(target, map[string]string{route.clientModelName: route.providerModelName}, false, proxyOptions{stripPathPrefix: "/v1", fullLogger: logger, staticAuthorization: provider.DummyToken}), nil
+		return newProxyWithOptions(target, map[string]string{route.clientModelName: route.providerModelName}, false, proxyOptions{stripPathPrefix: "/v1", fullLogger: logger, staticAuthorization: httpProxyStaticToken(provider), authorizationFile: provider.TokenFile}), nil
 	case "grok":
 		return grokapi.NewHandler(grokapi.HandlerOpts{Home: provider.Home, BaseURL: provider.BaseURL, Endpoint: endpoint, Logf: logger.Printf})
 	default:

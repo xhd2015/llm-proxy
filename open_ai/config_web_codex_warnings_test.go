@@ -137,6 +137,8 @@ func TestConfigWebCodexConfigWarningsWrongProvider(t *testing.T) {
 func TestConfigWebCodexConfigWarningsNotOnOtherRunners(t *testing.T) {
 	restore := withCodexUserConfig(t, "")
 	defer restore()
+	_, restoreCreds := withDSHCredentials(t, "version: 1\nrefs:\n  GROK_API_KEY: PROXY_MANAGED\n")
+	defer restoreCreds()
 	draft, err := json.Marshal(nativeTestConfig())
 	if err != nil {
 		t.Fatal(err)

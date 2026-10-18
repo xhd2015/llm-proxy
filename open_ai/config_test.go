@@ -419,6 +419,34 @@ func TestConfigHandlerListsEffectiveClientModelNames(t *testing.T) {
 	}
 }
 
+func TestHTTPProxyStaticTokenPrefersTokenOverDummy(t *testing.T) {
+	if got := httpProxyStaticToken(configProvider{Token: "secret", DummyToken: "PROXY_MANAGED"}); got != "secret" {
+		t.Fatalf("token = %q, want secret", got)
+	}
+	if got := httpProxyStaticToken(configProvider{DummyToken: "PROXY_MANAGED"}); got != "PROXY_MANAGED" {
+		t.Fatalf("dummyToken = %q, want PROXY_MANAGED", got)
+	}
+	if got := httpProxyStaticToken(configProvider{}); got != "" {
+		t.Fatalf("empty = %q", got)
+	}
+}
+
+func TestValidateHTTPProxyTokenFileDoesNotRequireTheFile(t *testing.T) {
+	config := proxyConfig{
+		Listen: "127.0.0.1:8890",
+		Providers: []configProvider{{
+			Name: "gw", Kind: "http-proxy", BaseURL: "http://127.0.0.1:1/v1", TokenFile: "/tmp/missing-token",
+		}},
+		Models: []configModel{{
+			Protocol: "anthropic-messages", Provider: "gw", ProviderModelName: "m",
+			Reasoning: &configReasoning{Disabled: true},
+		}},
+	}
+	if _, err := validateProxyConfig(config); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestConfigHandlerRejectsProtocolMismatch(t *testing.T) {
 	route := effectiveRoute{protocol: "anthropic-messages", clientModelName: "model", providerModelName: "provider-model"}
 	handler := &configHandler{routes: map[string]effectiveHandlerRoute{"model": {route: route, handler: http.NotFoundHandler()}}, models: []effectiveRoute{route}}

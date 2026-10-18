@@ -57,8 +57,8 @@ const (
 )
 
 // syncLineCountBudget bounds the quadratic line count; above it the counts fall
-// back to whole-region sizes.
-const syncLineCountBudget = 40000
+// back to whole-region sizes. 1e6 holds a ~1000-line DSH block (typical ~200).
+const syncLineCountBudget = 1_000_000
 
 var (
 	errConfigWebLocked       = errors.New("target is locked by another writer")
@@ -331,8 +331,20 @@ func mappingChild(node *yaml.Node, key string) *yaml.Node {
 // longest-common-subsequence length. Only the counts are needed: the diff panes
 // render the changes themselves.
 func lineDiffCounts(original, modified []string) (added, removed int) {
+	if len(original) == len(modified) {
+		same := true
+		for i := range original {
+			if original[i] != modified[i] {
+				same = false
+				break
+			}
+		}
+		if same {
+			return 0, 0
+		}
+	}
 	rows, cols := len(original), len(modified)
-	if rows*cols > syncLineCountBudget {
+	if rows > 0 && cols > syncLineCountBudget/rows {
 		return cols, rows
 	}
 	table := make([][]int, rows+1)

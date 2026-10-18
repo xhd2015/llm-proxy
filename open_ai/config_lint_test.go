@@ -87,6 +87,50 @@ func TestLintDispatchAndRemovedFlag(t *testing.T) {
 	}
 }
 
+func TestLintHTTPProxyTokenFields(t *testing.T) {
+	httpProxy := `{"listen":"127.0.0.1:8890","providers":[{"name":"gw","kind":"http-proxy","baseUrl":"http://127.0.0.1:1/v1","tokenFile":"/tmp/missing-token"}],"models":[{"protocol":"anthropic-messages","provider":"gw","providerModelName":"m","reasoning":{"disabled":true}}]}`
+	stdout, stderr, err := lintFile(t, httpProxy)
+	if err != nil || stderr != "" || !strings.Contains(stdout, "Config valid:") {
+		t.Fatalf("missing tokenFile should lint: %q %q %v", stdout, stderr, err)
+	}
+
+	both := strings.Replace(httpProxy, `"tokenFile":"/tmp/missing-token"`, `"token":"secret","tokenFile":"/tmp/missing-token"`, 1)
+	_, stderr, err = lintFile(t, both)
+	if err == nil || !strings.Contains(stderr, "mutually exclusive") {
+		t.Fatalf("want exclusive error, got %q %v", stderr, err)
+	}
+
+	tokenAndDummy := strings.Replace(httpProxy, `"tokenFile":"/tmp/missing-token"`, `"token":"secret","dummyToken":"PROXY_MANAGED"`, 1)
+	_, stderr, err = lintFile(t, tokenAndDummy)
+	if err == nil || !strings.Contains(stderr, "mutually exclusive") {
+		t.Fatalf("want token/dummyToken exclusive error, got %q %v", stderr, err)
+	}
+
+	onCodex := strings.Replace(lintValid, `"kind":"codex"`, `"kind":"codex","tokenFile":"/tmp/x"`, 1)
+	_, stderr, err = lintFile(t, onCodex)
+	if err == nil || !strings.Contains(stderr, "tokenFile is only supported by http-proxy") {
+		t.Fatalf("want kind error, got %q %v", stderr, err)
+	}
+
+	ws := strings.Replace(httpProxy, `"tokenFile":"/tmp/missing-token"`, `"token":" secret"`, 1)
+	_, stderr, err = lintFile(t, ws)
+	if err == nil || !strings.Contains(stderr, "token must not have surrounding whitespace") {
+		t.Fatalf("want whitespace error, got %q %v", stderr, err)
+	}
+
+	tokenOK := strings.Replace(httpProxy, `"tokenFile":"/tmp/missing-token"`, `"token":"secret"`, 1)
+	stdout, stderr, err = lintFile(t, tokenOK)
+	if err != nil || stderr != "" {
+		t.Fatalf("inline token should lint: %q %q %v", stdout, stderr, err)
+	}
+
+	dummyOK := strings.Replace(httpProxy, `"tokenFile":"/tmp/missing-token"`, `"dummyToken":"PROXY_MANAGED"`, 1)
+	stdout, stderr, err = lintFile(t, dummyOK)
+	if err != nil || stderr != "" {
+		t.Fatalf("dummyToken should lint: %q %q %v", stdout, stderr, err)
+	}
+}
+
 func TestRuntimeSharesLintErrors(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	body := strings.Replace(lintValid, `"providerModelName":"test"`, `"providerModelName":"test","input":[],"reasoningEfforts":{}`, 1)

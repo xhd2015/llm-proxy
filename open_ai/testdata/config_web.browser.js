@@ -48,6 +48,7 @@
   const providerRow = [...document.querySelectorAll('[data-level="provider"] > .tree-row')].find(row=>row.querySelector('.entry').textContent===provider.name);
   providerRow.querySelector('.entry').click();
   assert(field('Provider name').value===provider.name,'Provider row did not open settings');
+  assert(field('Token') && field('Token file') && field('Dummy token'), 'Provider form is missing token fields');
   document.querySelector(`[aria-label="Add model to ${provider.name}"]`).click();
   assert(field('Provider').value===provider.name,'Add model was not scoped to provider');
   clickTab('raw');edit($('raw'),JSON.stringify(original,null,2));await wait(valid);
@@ -157,5 +158,5 @@
   formToggle.click();
   assert(field('Client name').value === (original.models[0].clientModelName || ''), 'Returning to the form lost the model fields');
   assert(new URLSearchParams(location.search).get('edit') === null, 'Form mode kept edit=json in the URL');
-  return {passed: ['token-free access', 'provider tree', 'variant-only edits', 'variant URL param', 'search ancestry and expansion', 'provider-scoped add', 'form round-trip', 'malformed repair', 'modalities', 'variant inheritance', 'duplicate refusal', 'DSH preview', 'save backup', 'reload', 'provider form', 'model URL param', 'JSON editor toggle']};
+  return {passed: ['token-free access', 'provider tree', 'variant-only edits', 'variant URL param', 'search ancestry and expansion', 'provider-scoped add', 'form round-trip', 'malformed repair', 'modalities', 'variant inheritance', 'duplicate refusal', 'DSH preview', 'save backup', 'reload', 'provider form', 'provider token fields', 'model URL param', 'JSON editor toggle']};
 })()

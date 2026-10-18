@@ -576,6 +576,7 @@ function renderPreview() {
     }).catch(finish);
   }
   renderCodexConfigWarnings(preview);
+  renderDSHCredentials(preview);
   updateCatalogInstall();
 }
 function renderCodexConfigWarnings(preview) {
@@ -586,6 +587,21 @@ function renderCodexConfigWarnings(preview) {
     const message = warning && warning.message ? warning.message : String(warning || '');
     return node('li', message, 'warning');
   }));
+}
+function renderDSHCredentials(preview) {
+  const banner = $('dsh-credentials-banner');
+  const add = $('dsh-credentials-add');
+  const creds = previewRunner === 'dsh' ? preview?.credentials : null;
+  const missing = Array.isArray(creds?.missing) ? creds.missing : [];
+  const warnings = previewRunner === 'dsh' && Array.isArray(preview?.warnings) ? preview.warnings : [];
+  banner.hidden = warnings.length === 0;
+  $('dsh-credentials-warnings').replaceChildren(...warnings.map(warning => {
+    const message = warning && warning.message ? warning.message : String(warning || '');
+    return node('li', message, 'warning');
+  }));
+  add.hidden = previewRunner !== 'dsh' || missing.length === 0 || creds?.writable === false;
+  add.disabled = busy || missing.length === 0;
+  add.textContent = missing.length ? `Add placeholders (${missing.length})` : 'Add placeholders';
 }
 function updateCatalogInstall() {
   const install = $('catalog-install');
@@ -709,7 +725,7 @@ function field(parent, doc, target, key, label, kind = 'text', choices = null) {
     input = node(kind === 'json' ? 'textarea' : 'input');
     input.value = target[key] === undefined ? '' : kind === 'json' ? JSON.stringify(target[key], null, 2) : String(target[key]);
     if (kind === 'number') input.type = 'number';
-    if (key === 'dummyToken') input.type = 'password';
+    if (key === 'dummyToken' || key === 'token') input.type = 'password';
     input.spellcheck = false;
   }
   input.onchange = () => {
@@ -734,6 +750,52 @@ function field(parent, doc, target, key, label, kind = 'text', choices = null) {
   };
   input.oninput = input.onchange;
   wrap.append(input); parent.append(wrap);
+}
+function credentialsForm(parent, doc, provider) {
+  const box = node('fieldset');
+  box.append(node('legend', 'Credentials'));
+  box.append(node('p', 'First selected wins; if none are selected, the first entry is used. Restart the proxy after changing selection. Paths are editable; this editor never reads their contents.', 'hint'));
+  (provider.credentials || []).forEach((cred, index) => {
+    const row = node('div', undefined, 'credential');
+    const title = node('h3', cred.name || `Credential ${index + 1}`);
+    const selected = node('label');
+    const radio = node('input');
+    radio.type = 'radio';
+    radio.name = 'provider-credential';
+    radio.checked = !!cred.selected || (!provider.credentials.some(c => c.selected) && index === 0);
+    radio.onchange = () => {
+      provider.credentials.forEach((item, i) => {
+        if (i === index) item.selected = true;
+        else delete item.selected;
+      });
+      changeObject(doc);
+      renderForm(doc);
+    };
+    selected.append(radio, document.createTextNode(' Selected'));
+    row.append(title, selected);
+    const fields = node('div', undefined, 'fields');
+    field(fields, doc, cred, 'name', 'Name');
+    for (const [key, label] of [['baseUrl', 'Base URL'], ['home', 'Home directory'], ['authFile', 'Auth file path'], ['token', 'Token'], ['tokenFile', 'Token file'], ['dummyToken', 'Dummy token']]) field(fields, doc, cred, key, label);
+    row.append(fields);
+    row.append(button('Delete credential', () => {
+      if (!confirm('Delete this credential from the draft?') || !mayDiscardFields()) return;
+      provider.credentials.splice(index, 1);
+      if (!provider.credentials.length) delete provider.credentials;
+      changeObject(doc);
+      renderForm(doc);
+    }, 'danger'));
+    box.append(row);
+  });
+  box.append(button('+ Add credential', () => {
+    if (!mayDiscardFields()) return;
+    if (!Array.isArray(provider.credentials)) provider.credentials = [];
+    const cred = {};
+    if (!provider.credentials.length) cred.selected = true;
+    provider.credentials.push(cred);
+    changeObject(doc);
+    renderForm(doc);
+  }));
+  parent.append(box);
 }
 function inputsForm(parent, doc, target, variant) {
   const box = node('fieldset'); box.append(node('legend', 'Inputs'));
@@ -926,8 +988,23 @@ function modeToggle() {
     const fields=node('div',undefined,'fields');form.append(fields);
     field(fields,doc,item,'name','Provider name');field(fields,doc,item,'kind','Kind','text',['codex','commandcode','grok','http-proxy']);
     field(fields,doc,item,'subscription','Subscription','bool');
-    for(const [key,label] of [['baseUrl','Base URL'],['home','Home directory'],['authFile','Auth file path'],['version','Client version'],['dummyToken','Dummy token']]) field(fields,doc,item,key,label);
-    form.append(node('p','Auth file paths are editable; this editor never reads their contents.','hint'));
+    field(fields,doc,item,'version','Client version');
+    const useCredentials = Array.isArray(item.credentials) && item.credentials.length;
+    if (!useCredentials) {
+      for(const [key,label] of [['baseUrl','Base URL'],['home','Home directory'],['authFile','Auth file path'],['token','Token'],['tokenFile','Token file'],['dummyToken','Dummy token']]) field(fields,doc,item,key,label);
+      form.append(node('p','Use only one of token, tokenFile, and dummyToken. Paths are editable; this editor never reads their contents.','hint'));
+      form.append(button('Move into credentials list',()=>{
+        if(!mayDiscardFields())return;
+        const cred={selected:true};
+        for (const key of ['home','authFile','baseUrl','token','tokenFile','dummyToken']) {
+          if (item[key] !== undefined && item[key] !== '') { cred[key]=item[key]; delete item[key]; }
+        }
+        item.credentials=[cred];
+        changeObject(doc); renderForm(doc);
+      }));
+    } else {
+      credentialsForm(form,doc,item);
+    }
   } else {
     if (variantView) form.append(node('p','Omitted fields inherit from the base model.','hint'));
     modelFields(form,doc,item,variantView);
@@ -1039,6 +1116,18 @@ $('catalog-install').onclick=async()=>{
     if (value.result === 'unchanged') message('Already up to date.');
     else message((value.result === 'created' ? 'Created ' : 'Updated ') + value.path);
     await validate();
+  } catch (err) { message(err.message); }
+  finally { busy = false; state(); }
+};
+$('dsh-credentials-add').onclick=async()=>{
+  if (busy) return;
+  busy = true; state();
+  try {
+    const value = await api('credentials', {text, mergeNative: mergeNativeEnabled()});
+    if (value.report) showReport(value.report);
+    const added = Array.isArray(value.added) ? value.added : [];
+    if (!added.length) message('No missing placeholders.');
+    else message('Added ' + added.join(', ') + ' to ' + value.path + '. Restart is not required; DSH reloads credentials on the next model list.');
   } catch (err) { message(err.message); }
   finally { busy = false; state(); }
 };
