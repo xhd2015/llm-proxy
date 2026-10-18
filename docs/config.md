@@ -124,6 +124,13 @@ still selects the upstream effort. `protocol=openai-responses` with
 `protocolAdapter: "anthropic2openai"` fails validation. Variants inherit the
 adapter when omitted and may override it.
 
+Native `/v1/messages` requests that send `thinking.type=enabled` are rewritten
+to `thinking.type=adaptive` plus `output_config.effort` when the model requires
+adaptive thinking (Claude 5 / Opus 5 family, or `compat.forceAdaptiveThinking`).
+That rewrite lives in `pkgs/anthropicthinking`, not in the Responses converter.
+`dsh-models` emits `compat.forceAdaptiveThinking: true` for those models unless
+the config already set the flag, so DSH sends that form itself.
+
 Variants inherit the base model's protocol, provider, provider model name, and
 behavior. A model or variant may also define `displayName`, `inputs`,
 `contextWindow`, `maxTokens`, `compat`, `protocolAdapter`, `baseInstructions`,

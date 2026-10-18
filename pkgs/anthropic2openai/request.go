@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/xhd2015/llm-proxy/pkgs/anthropicthinking"
 )
 
 // Error kinds produced by the transforms, mirroring cc-switch's
@@ -228,47 +230,6 @@ func buildResponsesUsageFromAnthropic(usage any) map[string]any {
 }
 
 // ---------------------------------------------------------------------------
-// Thinking-optimizer model predicates (from cc-switch
-// proxy/thinking_optimizer.rs — the subset the request transform needs)
-// ---------------------------------------------------------------------------
-
-func normalizeModelName(model string) string {
-	replacer := strings.NewReplacer(".", "-", "_", "-")
-	return replacer.Replace(strings.ToLower(strings.TrimSpace(model)))
-}
-
-func modelMatchesAny(model string, needles []string) bool {
-	normalized := normalizeModelName(model)
-	for _, needle := range needles {
-		if strings.Contains(normalized, needle) {
-			return true
-		}
-	}
-	return false
-}
-
-var adaptiveThinkingModels = []string{
-	"fable-5", "mythos-5", "mythos-preview", "sonnet-5",
-	"opus-5", "opus-4-8", "opus-4-7", "opus-4-6", "sonnet-4-6",
-}
-
-var adaptiveThinkingDefaultModels = []string{"fable-5", "mythos-5", "mythos-preview", "sonnet-5"}
-
-var thinkingCannotBeDisabledModels = []string{"fable-5", "mythos-5"}
-
-func usesAdaptiveThinking(model string) bool {
-	return modelMatchesAny(model, adaptiveThinkingModels)
-}
-
-func adaptiveThinkingIsDefault(model string) bool {
-	return modelMatchesAny(model, adaptiveThinkingDefaultModels)
-}
-
-func thinkingCannotBeDisabled(model string) bool {
-	return modelMatchesAny(model, thinkingCannotBeDisabledModels)
-}
-
-// ---------------------------------------------------------------------------
 // Request transform
 // ---------------------------------------------------------------------------
 
@@ -409,9 +370,9 @@ func ResponsesToAnthropicWithContext(body map[string]any, options Options) (map[
 	result["messages"] = messages
 
 	reasoningEffort, hasReasoningEffort := stringAt(body, "reasoning", "effort")
-	adaptiveModel := usesAdaptiveThinking(model)
-	adaptiveByDefault := adaptiveThinkingIsDefault(model)
-	cannotDisableThinking := thinkingCannotBeDisabled(model)
+	adaptiveModel := anthropicthinking.UsesAdaptiveThinking(model)
+	adaptiveByDefault := anthropicthinking.AdaptiveThinkingIsDefault(model)
+	cannotDisableThinking := anthropicthinking.ThinkingCannotBeDisabled(model)
 
 	// max_output_tokens → max_tokens (required)
 	maxTokens := u64Of(body["max_output_tokens"])

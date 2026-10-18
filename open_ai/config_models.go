@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/xhd2015/less-gen/flags"
+	"github.com/xhd2015/llm-proxy/pkgs/anthropicthinking"
 	"gopkg.in/yaml.v3"
 )
 
@@ -680,12 +681,34 @@ func writeDSHProvider(out *strings.Builder, group dshProviderGroup, baseURL stri
 		if route.maxTokens != nil {
 			fmt.Fprintf(out, "            maxTokens: %d\n", *route.maxTokens)
 		}
-		writeDSHCompat(out, route.compat)
+		writeDSHCompat(out, dshCompatForRoute(route))
 		if !route.reasoning.Disabled {
 			writeDSHReasoningEfforts(out, route.reasoning.EffortsMapping)
 		}
 	}
 	return nil
+}
+
+// dshCompatForRoute copies route.compat and, for Anthropic models that
+// require adaptive thinking, fills forceAdaptiveThinking when the config
+// did not set it so DSH sends thinking.type=adaptive itself.
+func dshCompatForRoute(route effectiveRoute) map[string]bool {
+	compat := cloneBoolMap(route.compat)
+	if route.protocol != "anthropic-messages" || route.reasoning.Disabled {
+		return compat
+	}
+	if _, set := compat["forceAdaptiveThinking"]; set {
+		return compat
+	}
+	if !anthropicthinking.UsesAdaptiveThinking(route.providerModelName) &&
+		!anthropicthinking.UsesAdaptiveThinking(route.clientModelName) {
+		return compat
+	}
+	if compat == nil {
+		compat = map[string]bool{}
+	}
+	compat["forceAdaptiveThinking"] = true
+	return compat
 }
 
 func writeDSHCompat(out *strings.Builder, compat map[string]bool) {

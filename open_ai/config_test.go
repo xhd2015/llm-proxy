@@ -72,6 +72,113 @@ func TestLoadProxyConfigRejectsDuplicateEffectiveClientModelName(t *testing.T) {
 	}
 }
 
+func TestConfigHandlerRewritesEnabledThinkingForOpus(t *testing.T) {
+	var received map[string]any
+	backend := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Fatal(err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	high := "high"
+	route := effectiveRoute{
+		protocol:          "anthropic-messages",
+		clientModelName:   "claude-opus-5-5",
+		providerModelName: "claude-opus-5-5",
+		reasoning:         configReasoning{DefaultEffort: "high", EffortsMapping: map[string]*string{"high": &high}},
+	}
+	handler := &configHandler{routes: map[string]effectiveHandlerRoute{route.clientModelName: {route: route, handler: backend}}, models: []effectiveRoute{route}}
+	body := `{"model":"claude-opus-5-5","stream":true,"thinking":{"type":"enabled","budget_tokens":16384,"display":"summarized"},"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+	thinking, _ := received["thinking"].(map[string]any)
+	if thinking["type"] != "adaptive" {
+		t.Fatalf("thinking = %v", received["thinking"])
+	}
+	if _, exists := thinking["budget_tokens"]; exists {
+		t.Fatalf("budget_tokens still present: %v", thinking)
+	}
+	cfg, _ := received["output_config"].(map[string]any)
+	if cfg["effort"] != "high" {
+		t.Fatalf("output_config = %v", received["output_config"])
+	}
+}
+
+func TestConfigHandlerForceAdaptiveThinkingWithoutModelMatch(t *testing.T) {
+	var received map[string]any
+	backend := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Fatal(err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	route := effectiveRoute{
+		protocol:          "anthropic-messages",
+		clientModelName:   "deepseek-v4.1-flash-from-dsh",
+		providerModelName: "deepseek/deepseek-v4.1-flash",
+		compat:            map[string]bool{"forceAdaptiveThinking": true},
+		reasoning:         configReasoning{DefaultEffort: "xhigh"},
+	}
+	handler := &configHandler{routes: map[string]effectiveHandlerRoute{route.clientModelName: {route: route, handler: backend}}, models: []effectiveRoute{route}}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"deepseek-v4.1-flash-from-dsh","thinking":{"type":"enabled","budget_tokens":24576},"messages":[]}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if received["thinking"].(map[string]any)["type"] != "adaptive" {
+		t.Fatalf("thinking = %v", received["thinking"])
+	}
+	if received["output_config"].(map[string]any)["effort"] != "max" {
+		t.Fatalf("output_config = %v", received["output_config"])
+	}
+}
+
+func TestGenerateConfigDSHModelsInjectsAdaptiveThinking(t *testing.T) {
+	routes := []effectiveRoute{{
+		provider:          configProvider{Name: "compass-api", Kind: "http-proxy"},
+		protocol:          "anthropic-messages",
+		clientModelName:   "claude-opus-5-5",
+		providerModelName: "claude-opus-5-5",
+		displayName:       "Claude Opus 5.5",
+		input:             []string{"text", "image"},
+		reasoning:         configReasoning{DefaultEffort: "high", EffortsMapping: map[string]*string{"high": ptr("high")}},
+	}}
+	output, err := generateConfigDSHModels("127.0.0.1:8890", routes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output, "forceAdaptiveThinking: true") {
+		t.Fatalf("output missing injected forceAdaptiveThinking:\n%s", output)
+	}
+}
+
+func TestGenerateConfigDSHModelsRespectsExplicitAdaptiveFlag(t *testing.T) {
+	routes := []effectiveRoute{{
+		provider:          configProvider{Name: "compass-api", Kind: "http-proxy"},
+		protocol:          "anthropic-messages",
+		clientModelName:   "claude-opus-5-5",
+		providerModelName: "claude-opus-5-5",
+		input:             []string{"text"},
+		compat:            map[string]bool{"forceAdaptiveThinking": false},
+		reasoning:         configReasoning{DefaultEffort: "high"},
+	}}
+	output, err := generateConfigDSHModels("127.0.0.1:8890", routes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output, "forceAdaptiveThinking: false") {
+		t.Fatalf("explicit false must be preserved:\n%s", output)
+	}
+	if strings.Count(output, "forceAdaptiveThinking") != 1 {
+		t.Fatalf("flag should appear once:\n%s", output)
+	}
+}
+
 func TestConfigHandlerRoutesByClientModelNameAndRewritesProviderModel(t *testing.T) {
 	var receivedModel string
 	backend := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

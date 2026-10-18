@@ -17,6 +17,7 @@ import (
 	"github.com/xhd2015/llm-proxy/commandcode"
 	logutil "github.com/xhd2015/llm-proxy/log"
 	"github.com/xhd2015/llm-proxy/pkgs/anthropic2openai"
+	"github.com/xhd2015/llm-proxy/pkgs/anthropicthinking"
 )
 
 type proxyConfig struct {
@@ -458,6 +459,17 @@ func cloneReasoning(reasoning configReasoning) configReasoning {
 	}
 }
 
+func routeDefaultEffort(route effectiveRoute) string {
+	if route.reasoning.Disabled {
+		return ""
+	}
+	effort := route.reasoning.DefaultEffort
+	if mapped, ok := route.reasoning.EffortsMapping[effort]; ok && mapped != nil {
+		return *mapped
+	}
+	return effort
+}
+
 func cloneBoolMap(values map[string]bool) map[string]bool {
 	if values == nil {
 		return nil
@@ -819,6 +831,12 @@ func (h *configHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	request["model"] = entry.route.providerModelName
+	if protocol == "anthropic-messages" {
+		forceAdaptive := entry.route.compat["forceAdaptiveThinking"] ||
+			anthropicthinking.UsesAdaptiveThinking(entry.route.providerModelName) ||
+			anthropicthinking.UsesAdaptiveThinking(entry.route.clientModelName)
+		anthropicthinking.RewriteEnabledThinking(request, entry.route.providerModelName, forceAdaptive, routeDefaultEffort(entry.route))
+	}
 	body, err = json.Marshal(request)
 	if err != nil {
 		http.Error(w, "encode request: "+err.Error(), http.StatusInternalServerError)
