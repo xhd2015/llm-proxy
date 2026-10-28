@@ -67,6 +67,10 @@ fieldset { border: 1px solid var(--border); border-radius: 8px; padding: 16px; m
 #catalog-rows { display: flex; flex-direction: column; margin-top: 4px; }
 .runner-row { display: grid; grid-template-columns: minmax(0,1fr) auto auto; align-items: center; gap: 16px; padding: 16px 0; border-top: 1px solid var(--border); }
 #catalog-rows > .runner-row:first-child { border-top: 0; }
+/* A catalog that has to be fetched once before the row can compare anything
+   reads as an alert until that file exists. */
+.runner-row.is-missing { padding-left: 12px; border-radius: 6px; background: #fff5f5; box-shadow: inset 3px 0 0 var(--danger); }
+.runner-row.is-missing .runner-name { color: var(--danger); }
 .runner-main { min-width: 0; }
 .runner-title { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .runner-name { font-weight: 650; }
@@ -84,8 +88,10 @@ fieldset { border: 1px solid var(--border); border-radius: 8px; padding: 16px; m
   overflow: hidden;
 }
 .runner-error { color: var(--danger); }
+.runner-refresh-note { white-space: pre-line; }
 .runner-stats { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 .runner-stats:empty { display: none; }
+.runner-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .tag { display: inline-flex; align-items: center; border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; font-size: 11px; font-weight: 600; line-height: 1.7; color: var(--muted); background: var(--surface-2); white-space: nowrap; }
 .tag.add { color: var(--ok); border-color: #1a7f3740; background: #dafbe1; }
 .tag.change { color: var(--info); border-color: #0969da40; background: #ddf4ff; }

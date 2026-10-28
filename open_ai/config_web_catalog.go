@@ -2,12 +2,18 @@ package openai
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	grokapi "github.com/xhd2015/dot-pkgs/go-pkgs/shell/grok/api"
 	"github.com/xhd2015/llm-proxy/commandcode"
@@ -97,6 +103,40 @@ func catalogCheck(runner string) error {
 		}
 	}
 	return fmt.Errorf("unsupported catalog runner %q", runner)
+}
+
+// errCatalogMissing marks a runner catalog whose cache file has not been written
+// yet. The Models tab highlights that runner's own refresh command instead of
+// sending the reader through an unrelated login step.
+var errCatalogMissing = errors.New("the runner catalog cache is missing")
+
+// catalogMissingError tells the reader how to create the missing cache and
+// unwraps to errCatalogMissing so callers never parse the message.
+type catalogMissingError struct {
+	path string
+	hint string
+}
+
+func (e catalogMissingError) Error() string {
+	return fmt.Sprintf("%s does not exist; run `%s` to refresh the catalog", e.path, e.hint)
+}
+
+func (e catalogMissingError) Is(target error) bool { return target == errCatalogMissing }
+
+// catalogRefreshCommands maps a runner to the argv that refetches its catalog
+// cache. Only runners with a dedicated fetch command are listed, and the argv is
+// a constant: an editor request can never inject arguments or a shell.
+var catalogRefreshCommands = map[string][]string{
+	"grok": {"grok", "models"},
+}
+
+// catalogRefreshTimeout bounds one refresh; the CLIs may refresh an expired
+// access token before the catalog request.
+var catalogRefreshTimeout = 60 * time.Second
+
+func catalogRefreshCommand(runner string) ([]string, bool) {
+	args, ok := catalogRefreshCommands[runner]
+	return args, ok
 }
 
 // catalogProviderFor returns the provider serving a runner catalog. A draft may
@@ -193,7 +233,7 @@ func loadGrokCatalogSource(source catalogSource) (catalogSource, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return catalogSource{}, fmt.Errorf("%s does not exist; run `grok login` first", source.Path)
+			return catalogSource{}, catalogMissingError{path: source.Path, hint: "grok models"}
 		}
 		return catalogSource{}, fmt.Errorf("read %s: %w", source.Path, err)
 	}
@@ -815,6 +855,123 @@ type catalogSummary struct {
 	Conflicts int    `json:"conflicts"`
 	Error     string `json:"error,omitempty"`
 	Note      string `json:"note,omitempty"`
+	// Refresh is the command that refetches this runner's catalog, empty when
+	// the runner has none.
+	Refresh string `json:"refresh,omitempty"`
+	// Missing marks a cache file that a refresh has to create; the Models tab
+	// highlights the refresh action instead of the compare one.
+	Missing bool `json:"missing,omitempty"`
+}
+
+// catalogSummaryRow builds the Models tab row for one runner. configError is
+// the shared draft error; nil means the draft parses.
+func catalogSummaryRow(doc proxyConfig, kind string, configError error) catalogSummary {
+	row := catalogSummary{Runner: kind}
+	if args, ok := catalogRefreshCommand(kind); ok {
+		// Offer the refresh only when the draft has the provider it would
+		// write routes for; otherwise the command cannot help the row.
+		if _, err := catalogProviderFor(doc, kind); err == nil {
+			row.Refresh = strings.Join(args, " ")
+		}
+	}
+	if configError != nil {
+		row.Error = "fix the config errors before comparing catalogs"
+		return row
+	}
+	result, err := compareCatalog(doc, kind)
+	if err != nil {
+		row.Error = err.Error()
+		row.Missing = errors.Is(err, errCatalogMissing)
+		return row
+	}
+	row.Provider = result.Provider
+	row.Source = result.Source
+	row.Version = result.Version
+	row.FetchedAt = result.FetchedAt
+	row.Total = result.Models
+	row.Visible = result.Models - result.Hidden
+	row.Hidden = result.Hidden
+	row.Draft = len(result.Draft)
+	row.Added = len(result.Add)
+	row.Changed = len(result.Update)
+	row.Same = result.Same
+	row.Kept = result.Kept
+	row.Conflicts = result.Conflicts
+	row.Note = result.Note
+	return row
+}
+
+// catalogRefreshInFlight tracks running refreshes so a second click cannot
+// start a parallel catalog fetch for the same runner.
+var catalogRefreshInFlight = struct {
+	sync.Mutex
+	runners map[string]bool
+}{runners: map[string]bool{}}
+
+func beginCatalogRefresh(runner string) bool {
+	catalogRefreshInFlight.Lock()
+	defer catalogRefreshInFlight.Unlock()
+	if catalogRefreshInFlight.runners[runner] {
+		return false
+	}
+	catalogRefreshInFlight.runners[runner] = true
+	return true
+}
+
+func endCatalogRefresh(runner string) {
+	catalogRefreshInFlight.Lock()
+	defer catalogRefreshInFlight.Unlock()
+	delete(catalogRefreshInFlight.runners, runner)
+}
+
+// refreshCatalogCache runs the runner's own fetch command so the Models tab can
+// repair a missing cache without sending the reader to a terminal.
+func refreshCatalogCache(ctx context.Context, args []string) (string, error) {
+	return runCatalogRefreshCommand(ctx, args)
+}
+
+// runCatalogRefreshCommand executes one whitelisted argv. It is a variable so
+// tests can stub the child process instead of calling a real CLI.
+var runCatalogRefreshCommand = func(ctx context.Context, args []string) (string, error) {
+	path, err := catalogRefreshBinary(args[0])
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.CommandContext(ctx, path, args[1:]...)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	runErr := cmd.Run()
+	return catalogRefreshExcerpt(out.String()), runErr
+}
+
+// catalogRefreshBinary prefers the runner home's own launcher, then PATH.
+func catalogRefreshBinary(name string) (string, error) {
+	if name == "grok" {
+		if home, err := grokapi.DefaultHome(); err == nil {
+			path := filepath.Join(home, "bin", name)
+			if info, err := os.Stat(path); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+				return path, nil
+			}
+		}
+	}
+	path, err := exec.LookPath(name)
+	if err != nil {
+		return "", fmt.Errorf("cannot find `%s` on PATH: %w", name, err)
+	}
+	return path, nil
+}
+
+// catalogRefreshMaxOutput bounds the CLI output echoed to the editor.
+const catalogRefreshMaxOutput = 4096
+
+func catalogRefreshExcerpt(output string) string {
+	output = strings.TrimSpace(output)
+	runes := []rune(output)
+	if len(runes) <= catalogRefreshMaxOutput {
+		return output
+	}
+	return "…" + string(runes[len(runes)-catalogRefreshMaxOutput:])
 }
 
 // handleConfigWebCatalog serves the Models tab catalog endpoints. It reports
@@ -826,35 +983,44 @@ func handleConfigWebCatalog(w http.ResponseWriter, r *http.Request, text, runner
 		configError := diagnosticErrors(diagnostics)
 		rows := make([]catalogSummary, 0, len(catalogRunnerKinds))
 		for _, kind := range catalogRunnerKinds {
-			row := catalogSummary{Runner: kind}
-			if configError != nil {
-				row.Error = "fix the config errors before comparing catalogs"
-				rows = append(rows, row)
-				continue
-			}
-			result, err := compareCatalog(doc, kind)
-			if err != nil {
-				row.Error = err.Error()
-				rows = append(rows, row)
-				continue
-			}
-			row.Provider = result.Provider
-			row.Source = result.Source
-			row.Version = result.Version
-			row.FetchedAt = result.FetchedAt
-			row.Total = result.Models
-			row.Visible = result.Models - result.Hidden
-			row.Hidden = result.Hidden
-			row.Draft = len(result.Draft)
-			row.Added = len(result.Add)
-			row.Changed = len(result.Update)
-			row.Same = result.Same
-			row.Kept = result.Kept
-			row.Conflicts = result.Conflicts
-			row.Note = result.Note
-			rows = append(rows, row)
+			rows = append(rows, catalogSummaryRow(doc, kind, configError))
 		}
 		writeConfigWebJSON(w, 200, map[string]any{"runners": rows})
+		return true
+	case "/api/catalog-refresh":
+		args, ok := catalogRefreshCommand(runner)
+		if err := catalogCheck(runner); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return true
+		}
+		if !ok {
+			http.Error(w, fmt.Sprintf("no catalog refresh command for %q", runner), http.StatusBadRequest)
+			return true
+		}
+		doc, _, diagnostics := inspectProxyConfigBytes([]byte(text))
+		if err := diagnosticErrors(diagnostics); err != nil {
+			http.Error(w, "fix the config errors before refreshing catalogs: "+err.Error(), http.StatusUnprocessableEntity)
+			return true
+		}
+		if !beginCatalogRefresh(runner) {
+			http.Error(w, "a catalog refresh is already running", http.StatusConflict)
+			return true
+		}
+		defer endCatalogRefresh(runner)
+		ctx, cancel := context.WithTimeout(r.Context(), catalogRefreshTimeout)
+		defer cancel()
+		output, refreshErr := refreshCatalogCache(ctx, args)
+		// The row is read after the command so a successful fetch lands in it.
+		row := catalogSummaryRow(doc, runner, nil)
+		if refreshErr == nil {
+			writeConfigWebJSON(w, 200, map[string]any{"row": row, "output": output})
+			return true
+		}
+		message := refreshErr.Error()
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			message = fmt.Sprintf("`%s` timed out after %s", strings.Join(args, " "), catalogRefreshTimeout)
+		}
+		writeConfigWebJSON(w, http.StatusBadGateway, map[string]any{"row": row, "output": output, "error": message})
 		return true
 	case "/api/catalog-compare":
 		if err := catalogCheck(runner); err != nil {

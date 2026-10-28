@@ -290,7 +290,7 @@ func newConfigWebHandlerWithNative(store *configWebStore, host string, native *n
 			return
 		}
 		switch r.URL.Path {
-		case "/api/validate", "/api/save", "/api/catalog", "/api/diff", "/api/sync", "/api/credentials", "/api/catalog-summary", "/api/catalog-compare":
+		case "/api/validate", "/api/save", "/api/catalog", "/api/diff", "/api/sync", "/api/credentials", "/api/catalog-summary", "/api/catalog-compare", "/api/catalog-refresh":
 		default:
 			http.NotFound(w, r)
 			return

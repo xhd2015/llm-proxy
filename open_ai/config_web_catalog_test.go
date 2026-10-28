@@ -1,7 +1,11 @@
 package openai
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -365,5 +369,137 @@ func TestHandleConfigWebCatalogRejectsUnknownRunner(t *testing.T) {
 		if err := catalogCheck(runner); err != nil {
 			t.Fatalf("catalogCheck(%q): %v", runner, err)
 		}
+	}
+}
+
+// grokTestConfig is a draft with the Grok provider, so the row can offer the
+// catalog refresh command.
+func catalogGrokDraft() proxyConfig {
+	return proxyConfig{
+		Listen:    "127.0.0.1:63901",
+		Providers: []configProvider{{Name: "grok", Kind: "grok", Subscription: true}},
+		Models: []configModel{{
+			Protocol:          "openai-responses",
+			Provider:          "grok",
+			ProviderModelName: "grok-4.6",
+			DisplayName:       "Grok 4.6",
+			ContextWindow:     intPtr(500000),
+			Reasoning:         &configReasoning{Disabled: true},
+		}},
+	}
+}
+
+// grokTestCache is the shape ~/.grok/models_cache.json has after `grok models`.
+func catalogGrokCache() []byte {
+	data, _ := json.Marshal(map[string]any{
+		"fetched_at":   "2026-10-28T10:46:18Z",
+		"grok_version": "1.0.70",
+		"models": map[string]any{
+			"grok-4.7": map[string]any{"info": map[string]any{
+				"id": "grok-4.7", "name": "Grok 4.7",
+				"hidden": false, "supported_in_api": true,
+				"context_window": 256000, "context_windows": []int{256000, 500000},
+			}},
+		},
+	})
+	return data
+}
+
+func TestMissingGrokCacheOffersItsRefreshCommand(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("GROK_HOME", home)
+	doc := catalogGrokDraft()
+	_, err := loadCatalogSource(doc, "grok")
+	if err == nil {
+		t.Fatalf("loadCatalogSource read a cache the test never wrote")
+	}
+	if !errors.Is(err, errCatalogMissing) {
+		t.Fatalf("missing cache is not marked: %v", err)
+	}
+	if !strings.Contains(err.Error(), "`grok models`") {
+		t.Fatalf("message does not name the refresh command: %v", err)
+	}
+	row := catalogSummaryRow(doc, "grok", nil)
+	if !row.Missing || row.Refresh != "grok models" {
+		t.Fatalf("row = %+v, want a missing catalog with a refresh command", row)
+	}
+	if row.Error == "" {
+		t.Fatalf("missing catalog row carries no error")
+	}
+}
+
+func TestCatalogSummaryOmitsRefreshWithoutProvider(t *testing.T) {
+	t.Setenv("GROK_HOME", t.TempDir())
+	row := catalogSummaryRow(catalogTestConfig(), "grok", nil)
+	if row.Refresh != "" || row.Missing {
+		t.Fatalf("row = %+v, want no refresh without a grok provider", row)
+	}
+	if !strings.Contains(row.Error, "no provider") {
+		t.Fatalf("row error = %q", row.Error)
+	}
+}
+
+func TestCatalogRefreshRunsTheRunnerCommand(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("GROK_HOME", home)
+	original := runCatalogRefreshCommand
+	defer func() { runCatalogRefreshCommand = original }()
+	var got []string
+	runCatalogRefreshCommand = func(ctx context.Context, args []string) (string, error) {
+		got = args
+		if err := os.WriteFile(filepath.Join(home, "models_cache.json"), catalogGrokCache(), 0o600); err != nil {
+			return "", err
+		}
+		return "Default model: grok-4.7", nil
+	}
+	handler := webTestHandler(webTestStore(t, `{"models":[]}`))
+	body, _ := json.Marshal(map[string]string{"text": catalogTestConfigText(t, catalogGrokDraft()), "runner": "grok"})
+	w := webTestRequest(handler, "POST", "/api/catalog-refresh", string(body))
+	if w.Code != 200 {
+		t.Fatalf("refresh status %d: %s", w.Code, w.Body.String())
+	}
+	if strings.Join(got, " ") != "grok models" {
+		t.Fatalf("ran %q, want the whitelisted argv", got)
+	}
+	var response struct {
+		Row    catalogSummary `json:"row"`
+		Output string         `json:"output"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Row.Error != "" || response.Row.Missing {
+		t.Fatalf("row = %+v, want the cache it just wrote", response.Row)
+	}
+	if response.Row.Visible != 1 || response.Row.Version != "1.0.70" {
+		t.Fatalf("row = %+v", response.Row)
+	}
+	if response.Output != "Default model: grok-4.7" {
+		t.Fatalf("output = %q", response.Output)
+	}
+}
+
+func TestCatalogRefreshRejectsOtherRunners(t *testing.T) {
+	handler := webTestHandler(webTestStore(t, `{"models":[]}`))
+	for _, runner := range []string{"codex", "commandcode", "claude"} {
+		body, _ := json.Marshal(map[string]string{"text": `{"models":[]}`, "runner": runner})
+		w := webTestRequest(handler, "POST", "/api/catalog-refresh", string(body))
+		if w.Code != 400 {
+			t.Fatalf("runner %q status %d: %s", runner, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestCatalogRefreshIsSingleFlight(t *testing.T) {
+	t.Setenv("GROK_HOME", t.TempDir())
+	if !beginCatalogRefresh("grok") {
+		t.Fatalf("first refresh did not start")
+	}
+	defer endCatalogRefresh("grok")
+	handler := webTestHandler(webTestStore(t, `{"models":[]}`))
+	body, _ := json.Marshal(map[string]string{"text": catalogTestConfigText(t, catalogGrokDraft()), "runner": "grok"})
+	w := webTestRequest(handler, "POST", "/api/catalog-refresh", string(body))
+	if w.Code != 409 {
+		t.Fatalf("second refresh status %d: %s", w.Code, w.Body.String())
 	}
 }

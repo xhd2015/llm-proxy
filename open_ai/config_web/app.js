@@ -498,6 +498,9 @@ function openJSONEditor(doc, item, kind) {
 // and the context-window updates before any of them reach the draft.
 const compareRunnerNames = {codex: 'Codex', grok: 'Grok', commandcode: 'Command Code'};
 let catalogRows = null, catalogError = '', catalogsLoading = false, catalogsToken = 0, catalogShown = null;
+// A runner whose catalog cache is missing offers its own fetch command, so the
+// reader can create the file from here instead of a terminal.
+let catalogRefreshing = '', catalogRefreshNotes = {};
 let compareData = null, compareError = '', compareLoading = false, compareToken = 0;
 // The right pane is editable, so the view owns the same three states as the
 // previews' on-disk pane: edited here, blocked by a stale file, and in flight.
@@ -523,21 +526,63 @@ function catalogSummaryText(row) {
   return bits.join(' · ');
 }
 function catalogRow(row) {
-  const wrap = node('div', undefined, 'runner-row' + (row.error ? ' is-error' : ''));
+  const wrap = node('div', undefined, 'runner-row' + (row.error ? ' is-error' : '') + (row.missing ? ' is-missing' : ''));
   const main = node('div', undefined, 'runner-main');
   const title = node('div', undefined, 'runner-title');
   title.append(node('span', runnerName(row.runner), 'runner-name'));
   if (row.source) title.append(node('code', row.source, 'runner-source'));
   main.append(title, node('p', catalogSummaryText(row), row.error ? 'runner-error' : 'runner-meta'));
   if (row.note) main.append(node('p', row.note, 'runner-note'));
+  const refreshNote = catalogRefreshNotes[row.runner];
+  if (refreshNote) main.append(node('p', refreshNote, 'runner-error runner-refresh-note'));
   wrap.append(main);
   const stats = node('div', undefined, 'runner-stats');
   for (const [kind, label] of catalogDelta(row)) stats.append(node('span', label, `tag ${kind}`));
   wrap.append(stats);
+  const actions = node('div', undefined, 'runner-actions');
+  if (row.refresh) {
+    const running = catalogRefreshing === row.runner;
+    // Missing cache means the command has to run at least once, so that action
+    // carries the primary weight; an existing cache only offers a re-fetch.
+    const run = button(running ? `Running ${row.refresh}…` : `Run ${row.refresh}`, () => refreshCatalog(row.runner), 'go' + (row.missing && !running ? ' primary' : ''));
+    run.disabled = !!catalogRefreshing;
+    actions.append(run);
+  }
   const go = button(row.error ? 'Unavailable' : 'Compare', () => openCompare(row.runner), 'go');
   go.disabled = !!row.error;
-  wrap.append(go);
+  actions.append(go);
+  wrap.append(actions);
   return wrap;
+}
+// refreshCatalog runs the runner's catalog fetch command server-side, then
+// swaps that one row for the freshly read catalog.
+async function refreshCatalog(runner) {
+  if (catalogRefreshing) return;
+  catalogRefreshing = runner;
+  delete catalogRefreshNotes[runner];
+  renderCatalogs();
+  try {
+    const response = await fetch('/api/catalog-refresh', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text, runner}),
+    });
+    let value = null;
+    try { value = await response.json(); } catch {}
+    if (value && value.row) {
+      const rows = Array.isArray(catalogRows) ? catalogRows : catalogShown || [];
+      catalogRows = rows.map((row) => (row.runner === runner ? value.row : row));
+    }
+    if (!response.ok) {
+      const detail = [value?.error || `HTTP ${response.status}`, (value?.output || '').trim()].filter(Boolean).join('\n');
+      catalogRefreshNotes[runner] = detail;
+    }
+  } catch (err) {
+    catalogRefreshNotes[runner] = err.message || 'Could not run the catalog refresh.';
+  } finally {
+    catalogRefreshing = '';
+    renderCatalogs();
+  }
 }
 function renderCatalogs() {
   const box = $('catalogs');
