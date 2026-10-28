@@ -57,3 +57,17 @@ test('preview tab carries diff=1 only', () => {
   assert.equal(editorSearch({tab: 'preview', runner: 'grok', file: 'llm-proxy-grok.toml', diff: '1'}), '?tab=preview&runner=grok&file=llm-proxy-grok.toml&diff=1');
   assert.deepEqual(parseEditorURL('?diff=1'), {tab: 'models', runner: 'dsh', file: '', model: '', edit: '', diff: '1'});
 });
+
+// The compare tab is deep-linkable too, but its runner is one of the catalog
+// kinds, so a preview runner must not leak into it.
+test('compare tab carries the catalog runner', () => {
+  const search = editorSearch({tab: 'compare', runner: 'grok'});
+  assert.equal(search, '?tab=compare&runner=grok');
+  assert.deepEqual(parseEditorURL(search), {tab: 'compare', runner: 'grok', file: '', model: '', edit: '', diff: ''});
+  assert.equal(editorSearch({tab: 'compare', runner: 'commandcode'}), '?tab=compare&runner=commandcode');
+  assert.deepEqual(parseEditorURL('?tab=compare'), {tab: 'compare', runner: 'codex', file: '', model: '', edit: '', diff: ''});
+  assert.deepEqual(parseEditorURL('?tab=compare&runner=dsh'), {tab: 'compare', runner: 'codex', file: '', model: '', edit: '', diff: ''});
+  assert.deepEqual(parseEditorURL('?tab=preview&runner=commandcode'), {tab: 'preview', runner: 'dsh', file: '', model: '', edit: '', diff: ''});
+  assert.equal(editorSearch({tab: 'compare', runner: 'dsh'}), '?tab=compare&runner=codex');
+  assert.equal(editorSearch({tab: 'compare', runner: 'grok', file: 'x.json', diff: '1'}), '?tab=compare&runner=grok');
+});

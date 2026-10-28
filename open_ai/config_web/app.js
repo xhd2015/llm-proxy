@@ -7,6 +7,7 @@ const initialUI = parseEditorURL(location.search);
 let text = '', saved = '', revision = '', tab = initialUI.tab, selected = 0, report = null;
 let previewRunner = initialUI.runner, previewFile = 0, previewFileName = initialUI.file;
 let editJSON = initialUI.edit === 'json';
+let compareRunner = initialUI.tab === 'compare' ? initialUI.runner : 'codex';
 const mergeNativeStorageKey = 'llm-proxy.merge-native';
 function mergeNativeEnabled() {
   try { return localStorage.getItem(mergeNativeStorageKey) !== '0'; } catch { return true; }
@@ -41,7 +42,7 @@ function state() {
 function syncURL() {
   const file = tab === 'preview' ? (selectedPreviewFile()?.name || previewFileName) : '';
   const open = tab === 'models' ? openModelRoute() : null;
-  const search = editorSearch({tab, runner: previewRunner, file, model: open?.name || '', edit: editJSON && tab === 'models' ? 'json' : '', diff: tab === 'preview' && syncOpen ? '1' : ''});
+  const search = editorSearch({tab, runner: tab === 'compare' ? compareRunner : previewRunner, file, model: open?.name || '', edit: editJSON && tab === 'models' ? 'json' : '', diff: tab === 'preview' && syncOpen ? '1' : ''});
   const next = location.pathname + search + location.hash;
   if (next !== location.pathname + location.search + location.hash) history.replaceState(null, '', next);
 }
@@ -52,8 +53,13 @@ async function api(path, body) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!response.ok) {
-    if (response.status === 422) { const value = await response.json(); showReport(value); throw new Error('Fix validation errors before saving.'); }
-    throw new Error(await response.text());
+    const raw = await response.text();
+    if (response.status === 422) {
+      let value = null;
+      try { value = JSON.parse(raw); } catch {}
+      if (value && Array.isArray(value.diagnostics)) { showReport(value); throw new Error('Fix validation errors before saving.'); }
+    }
+    throw new Error(raw);
   }
   return response.json();
 }
@@ -484,6 +490,250 @@ function openJSONEditor(doc, item, kind) {
     });
   }).catch(err => { message(err.message || 'Could not load the JSON editor.'); });
 }
+// The Models tab ends with one row per agent runner whose model catalog can be
+// compared with this config. Comparing generates a provider-only fragment from
+// the runner's own catalog (the Codex and Grok CLIs keep a models cache, the
+// Command Code catalog is compiled into llm-proxy) and diffs it against the
+// routes that provider already serves here, so the reader reviews the additions
+// and the context-window updates before any of them reach the draft.
+const compareRunnerNames = {codex: 'Codex', grok: 'Grok', commandcode: 'Command Code'};
+let catalogRows = null, catalogError = '', catalogsLoading = false, catalogsToken = 0, catalogShown = null;
+let compareData = null, compareError = '', compareLoading = false, compareToken = 0;
+const plural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
+const runnerName = (runner) => compareRunnerNames[runner] || runner;
+function catalogDelta(stats) {
+  const parts = [];
+  if (stats.added) parts.push(['add', `+${stats.added} new`]);
+  if (stats.changed) parts.push(['change', `${stats.changed} window update${stats.changed === 1 ? '' : 's'}`]);
+  if (stats.same) parts.push(['same', `${stats.same} in sync`]);
+  if (stats.kept) parts.push(['same', `${stats.kept} kept`]);
+  if (stats.conflicts) parts.push(['warn', `${stats.conflicts} skipped`]);
+  return parts;
+}
+function catalogSummaryText(row) {
+  if (row.error) return row.error;
+  const bits = [];
+  if (row.version) bits.push(row.version);
+  bits.push(plural(row.visible, 'visible model') + (row.hidden ? `, ${row.hidden} hidden` : ''));
+  bits.push(`${plural(row.draft, 'route')} here`);
+  if (row.fetchedAt) bits.push('fetched ' + row.fetchedAt.slice(0, 10));
+  return bits.join(' · ');
+}
+function catalogRow(row) {
+  const wrap = node('div', undefined, 'runner-row' + (row.error ? ' is-error' : ''));
+  const main = node('div', undefined, 'runner-main');
+  const title = node('div', undefined, 'runner-title');
+  title.append(node('span', runnerName(row.runner), 'runner-name'));
+  if (row.source) title.append(node('code', row.source, 'runner-source'));
+  main.append(title, node('p', catalogSummaryText(row), row.error ? 'runner-error' : 'runner-meta'));
+  if (row.note) main.append(node('p', row.note, 'runner-note'));
+  wrap.append(main);
+  const stats = node('div', undefined, 'runner-stats');
+  for (const [kind, label] of catalogDelta(row)) stats.append(node('span', label, `tag ${kind}`));
+  wrap.append(stats);
+  const go = button(row.error ? 'Unavailable' : 'Compare', () => openCompare(row.runner), 'go');
+  go.disabled = !!row.error;
+  wrap.append(go);
+  return wrap;
+}
+function renderCatalogs() {
+  const box = $('catalogs');
+  box.hidden = tab !== 'models';
+  if (box.hidden) return;
+  const list = $('catalog-rows');
+  if (catalogError) {
+    catalogShown = null;
+    list.replaceChildren(node('p', catalogError, 'runner-error'));
+    return;
+  }
+  // While a refetch is in flight, keep the previous rows on screen so that a
+  // draft edit does not flash the whole section back to its loading state.
+  const rows = Array.isArray(catalogRows) ? catalogRows : catalogShown;
+  if (!rows) {
+    if (!catalogsLoading) loadCatalogs();
+    if (!list.childElementCount) list.replaceChildren(node('p', 'Reading the runner catalogs…', 'hint'));
+    return;
+  }
+  catalogShown = rows;
+  list.replaceChildren(...rows.map(catalogRow));
+}
+async function loadCatalogs() {
+  const token = ++catalogsToken;
+  catalogsLoading = true;
+  catalogError = '';
+  try {
+    const value = await api('catalog-summary', {text, mergeNative: mergeNativeEnabled()});
+    if (token !== catalogsToken) return;
+    catalogRows = Array.isArray(value.runners) ? value.runners : [];
+  } catch (err) {
+    if (token !== catalogsToken) return;
+    catalogRows = null;
+    catalogShown = null;
+    catalogError = err.message;
+  } finally {
+    if (token === catalogsToken) { catalogsLoading = false; renderCatalogs(); }
+  }
+}
+function openCompare(runner) {
+  if (!mayDiscardFields()) return;
+  flushJSONToDraft();
+  tab = 'compare';
+  compareRunner = runner;
+  compareData = null;
+  compareError = '';
+  render();
+  state();
+}
+// openComparePanel is the render() hook for the compare tab: it paints the
+// shell first, then reads the source once per visit so a reload does not repeat
+// the file reads.
+function openComparePanel() {
+  renderCompare();
+  if (!compareData && !compareLoading && !compareError) loadCompare();
+}
+async function loadCompare() {
+  const token = ++compareToken;
+  compareLoading = true;
+  compareError = '';
+  compareData = null;
+  renderCompare();
+  try {
+    const value = await api('catalog-compare', {text, runner: compareRunner, mergeNative: mergeNativeEnabled()});
+    if (token !== compareToken) return;
+    compareData = value;
+  } catch (err) {
+    if (token !== compareToken) return;
+    compareError = err.message;
+  } finally {
+    if (token === compareToken) { compareLoading = false; if (tab === 'compare') renderCompare(); }
+  }
+}
+function compareStatusText(data) {
+  const stats = data.stats || {};
+  const parts = [`${plural(stats.total, 'model')} in ${data.source}`];
+  parts.push(`${stats.visible} visible, ${stats.hidden} hidden`);
+  parts.push(`${plural(stats.draft, 'route')} here`);
+  if (stats.added) parts.push(`${stats.added} to add`);
+  if (stats.changed) parts.push(`${stats.changed} context window${stats.changed === 1 ? '' : 's'} to update`);
+  if (stats.same) parts.push(`${stats.same} already in sync`);
+  if (stats.kept) parts.push(`${stats.kept} kept because the catalog does not list them`);
+  if (stats.conflicts) parts.push(`${stats.conflicts} skipped`);
+  return parts.join(' · ');
+}
+function renderCompare() {
+  const name = runnerName(compareRunner);
+  $('compare-runner').textContent = name;
+  const data = compareData;
+  const stats = data?.stats;
+  $('compare-title').textContent = data ? `Generated ${name} config` : `${name} catalog`;
+  const apply = $('compare-apply');
+  const count = stats ? stats.added + stats.changed : 0;
+  apply.textContent = count ? `Apply ${count} route${count === 1 ? '' : 's'} to draft` : 'Nothing to apply';
+  apply.disabled = !count;
+  $('compare-copy').disabled = !data;
+  $('compare-left-name').textContent = data ? `config.${data.provider}.generated.json · proposed` : 'generated';
+  $('compare-right-name').textContent = data ? `config.json · models where provider=${data.provider}` : 'config.json';
+  $('compare-note').hidden = !data?.note;
+  $('compare-note').textContent = data?.note || '';
+  const status = $('compare-status');
+  status.hidden = false;
+  status.className = compareError ? 'runner-error' : 'hint';
+  status.textContent = compareLoading ? `Reading ${name}'s models…`
+    : compareError ? compareError
+    : data ? compareStatusText(data)
+    : '';
+  $('compare-diff').hidden = !data;
+  $('compare-files').hidden = !data;
+  if (!data) return;
+  const token = ++compareDiffToken;
+  loadMonaco().then(monaco => {
+    if (token !== compareDiffToken || tab !== 'compare') return;
+    ensureCompareDiff(monaco, data.generated, data.draft);
+  }).catch(err => {
+    if (token !== compareDiffToken) return;
+    $('compare-diff').hidden = true;
+    status.hidden = false;
+    status.className = 'runner-error';
+    status.textContent = err.message || 'Could not load the diff editor.';
+    $('compare-text').textContent = `${data.generated}\n→ ${data.draft}`;
+    $('compare-text').hidden = false;
+  });
+}
+let compareDiff, compareLeft, compareRight, compareDiffToken = 0;
+previewSideBySide.addEventListener('change', () => {
+  compareDiff?.updateOptions({renderSideBySide: previewSideBySide.matches});
+});
+// The panes follow the previews' orientation: the generated file fills the
+// read-only left pane, this config fills the right pane, so additions read as
+// lines the left side has and the config does not.
+function ensureCompareDiff(monaco, generatedText, draftText) {
+  if (!compareDiff) {
+    compareDiff = monaco.editor.createDiffEditor($('compare-diff'), {
+      readOnly: true,
+      originalEditable: false,
+      renderMarginRevertIcon: false,
+      renderGutterMenu: false,
+      useInlineViewWhenSpaceIsLimited: false,
+      renderSideBySide: previewSideBySide.matches,
+      originalAriaLabel: 'Routes Apply would leave in this config, generated, read-only',
+      modifiedAriaLabel: 'Routes this config has today, read-only',
+      automaticLayout: true,
+      scrollBeyondLastLine: false,
+      minimap: {enabled: false},
+      wordWrap: 'on',
+    });
+    compareLeft = monaco.editor.createModel(generatedText, 'json');
+    compareRight = monaco.editor.createModel(draftText, 'json');
+    compareDiff.setModel({original: compareLeft, modified: compareRight});
+  } else {
+    if (compareLeft.getValue() !== generatedText) compareLeft.setValue(generatedText);
+    if (compareRight.getValue() !== draftText) compareRight.setValue(draftText);
+    compareDiff.updateOptions({renderSideBySide: previewSideBySide.matches});
+  }
+  compareDiff.layout();
+}
+// applyComparison merges the reviewed routes into the draft in place: additions
+// keep the position of the generated list (appended at the end of models[]), and
+// updates touch contextWindow only, so a curated displayName or reasoning block
+// is never rewritten by a catalog refresh.
+function applyComparison() {
+  const data = compareData;
+  if (!data) return;
+  const doc = parsed();
+  if (!doc || !Array.isArray(doc.models)) { message('Repair the JSON first.'); return; }
+  const key = (model) => model.clientModelName || model.providerModelName || '';
+  const byKey = new Map();
+  for (const model of doc.models) if (model && model.provider === data.provider) byKey.set(key(model), model);
+  let touched = 0;
+  for (const update of data.update || []) {
+    const model = byKey.get(update.key);
+    if (!model) continue;
+    model.contextWindow = update.contextWindow;
+    touched++;
+  }
+  for (const route of data.add || []) {
+    if (!route || !route.providerModelName) continue;
+    if (byKey.has(key(route))) continue;
+    doc.models.push({...route});
+    touched++;
+  }
+  if (!touched) { message('Nothing to apply.'); return; }
+  changeObject(doc);
+  tab = 'models';
+  render();
+  state();
+  message(`Applied ${touched} route${touched === 1 ? '' : 's'} from the ${runnerName(data.runner)} catalog to this draft. Review the diff in Raw JSON, then Save config.`);
+}
+$('catalog-refresh').onclick = () => { catalogRows = null; catalogError = ''; renderCatalogs(); };
+$('compare-back').onclick = () => { if (!mayDiscardFields()) return; tab = 'models'; render(); state(); validate(); };
+$('compare-refresh').onclick = loadCompare;
+$('compare-copy').onclick = async () => {
+  if (!compareData) return;
+  try { await navigator.clipboard.writeText(compareData.generated); message('Generated routes copied.'); }
+  catch (err) { message(err.message); }
+};
+$('compare-apply').onclick = applyComparison;
+
 function renderPreview() {
   const preview = report?.previews?.[previewRunner];
   const name = previewRunner === 'dsh' ? 'DSH' : previewRunner === 'codex' ? 'Codex' : 'Grok';
@@ -647,7 +897,11 @@ async function validate() {
   const requestGeneration = ++generation;
   try {
     const value = await api('validate', {text, mergeNative: mergeNativeEnabled()});
-    if (requestGeneration === generation) showReport(value);
+    if (requestGeneration === generation) {
+      showReport(value);
+      catalogRows = null;
+      if (tab === 'models') renderCatalogs();
+    }
   } catch (err) { if (requestGeneration === generation) { report = null; state(); message(err.message); } }
 }
 function changed() {
@@ -694,6 +948,7 @@ async function load() {
       }
       editJSON = urlState.edit === 'json';
       syncOpen = urlState.diff === '1';
+      if (urlState.tab === 'compare') compareRunner = urlState.runner;
     }
     render(); showReport(value.report); message('');
   } catch (err) { message(err.message); }
@@ -1084,8 +1339,11 @@ function render() {
   document.querySelectorAll('[data-tab]').forEach(el=>el.setAttribute('aria-pressed',String(el.dataset.tab===tab)));
   $('structured').hidden=!['models','providers'].includes(tab);
   $('raw-panel').hidden=tab!=='raw';$('preview-panel').hidden=tab!=='preview';
+  $('catalogs').hidden=tab!=='models';$('compare-panel').hidden=tab!=='compare';
   if(tab==='models'||tab==='providers'){const doc=parsed();renderList(doc);renderForm(doc);}
   if(tab==='raw')$('raw').value=text;
+  if(tab==='models')renderCatalogs();
+  if(tab==='compare')openComparePanel();
 }
 document.querySelectorAll('[data-tab]').forEach(el=>el.onclick=()=>{if(!mayDiscardFields()||!mayDiscardSync())return;flushJSONToDraft();tab=el.dataset.tab;selected=0;selectedVariant=selectedProvider=-1;$('search').value='';render();state();validate();});
 $('add').onclick=()=>{

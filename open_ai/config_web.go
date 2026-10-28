@@ -289,7 +289,9 @@ func newConfigWebHandlerWithNative(store *configWebStore, host string, native *n
 			writeConfigWebJSON(w, 200, map[string]any{"text": text, "revision": revision, "path": store.path, "report": inspectConfigWebDraft(text, options)})
 			return
 		}
-		if r.URL.Path != "/api/validate" && r.URL.Path != "/api/save" && r.URL.Path != "/api/catalog" && r.URL.Path != "/api/diff" && r.URL.Path != "/api/sync" && r.URL.Path != "/api/credentials" {
+		switch r.URL.Path {
+		case "/api/validate", "/api/save", "/api/catalog", "/api/diff", "/api/sync", "/api/credentials", "/api/catalog-summary", "/api/catalog-compare":
+		default:
 			http.NotFound(w, r)
 			return
 		}
@@ -319,6 +321,9 @@ func newConfigWebHandlerWithNative(store *configWebStore, host string, native *n
 		}
 		if decoder.Decode(new(any)) != io.EOF || len(draft.Text) > configWebMaxBytes {
 			http.Error(w, "invalid or oversized editor request", 400)
+			return
+		}
+		if handleConfigWebCatalog(w, r, draft.Text, draft.Runner) {
 			return
 		}
 		options := configModelsOptions{codexMergeNative: draft.MergeNative == nil || *draft.MergeNative, nativeLoader: native}
