@@ -499,6 +499,9 @@ function openJSONEditor(doc, item, kind) {
 const compareRunnerNames = {codex: 'Codex', grok: 'Grok', commandcode: 'Command Code'};
 let catalogRows = null, catalogError = '', catalogsLoading = false, catalogsToken = 0, catalogShown = null;
 let compareData = null, compareError = '', compareLoading = false, compareToken = 0;
+// The right pane is editable, so the view owns the same three states as the
+// previews' on-disk pane: edited here, blocked by a stale file, and in flight.
+let compareDirty = false, compareConflict = '', comparePending = false, compareSaving = false;
 const plural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
 const runnerName = (runner) => compareRunnerNames[runner] || runner;
 function catalogDelta(stats) {
@@ -575,12 +578,14 @@ async function loadCatalogs() {
   }
 }
 function openCompare(runner) {
-  if (!mayDiscardFields()) return;
+  if (!mayDiscardFields() || !mayDiscardCompare()) return;
   flushJSONToDraft();
   tab = 'compare';
   compareRunner = runner;
   compareData = null;
   compareError = '';
+  compareDirty = false;
+  compareConflict = '';
   render();
   state();
 }
@@ -595,56 +600,60 @@ async function loadCompare() {
   const token = ++compareToken;
   compareLoading = true;
   compareError = '';
-  compareData = null;
   renderCompare();
   try {
     const value = await api('catalog-compare', {text, runner: compareRunner, mergeNative: mergeNativeEnabled()});
     if (token !== compareToken) return;
     compareData = value;
+    compareDirty = false;
+    compareConflict = '';
   } catch (err) {
     if (token !== compareToken) return;
+    compareData = null;
     compareError = err.message;
   } finally {
     if (token === compareToken) { compareLoading = false; if (tab === 'compare') renderCompare(); }
   }
 }
+// compareStatusText states how the two files differ, not what a button would
+// do: the panes are the proposal, and the reader saves the right one.
 function compareStatusText(data) {
   const stats = data.stats || {};
-  const parts = [`${plural(stats.total, 'model')} in ${data.source}`];
-  parts.push(`${stats.visible} visible, ${stats.hidden} hidden`);
-  parts.push(`${plural(stats.draft, 'route')} here`);
-  if (stats.added) parts.push(`${stats.added} to add`);
-  if (stats.changed) parts.push(`${stats.changed} context window${stats.changed === 1 ? '' : 's'} to update`);
-  if (stats.same) parts.push(`${stats.same} already in sync`);
-  if (stats.kept) parts.push(`${stats.kept} kept because the catalog does not list them`);
-  if (stats.conflicts) parts.push(`${stats.conflicts} skipped`);
+  const parts = [`${plural(stats.total, 'model')} in the catalog`];
+  parts.push(`${stats.visible} visible` + (stats.hidden ? `, ${stats.hidden} hidden` : ''));
+  parts.push(`${plural(stats.draft, 'route')} on disk`);
+  if (stats.added) parts.push(`${stats.added} missing from this config`);
+  if (stats.changed) parts.push(`${stats.changed} context window${stats.changed === 1 ? '' : 's'} differ`);
+  if (stats.same) parts.push(`${stats.same} in sync`);
+  if (stats.kept) parts.push(`${stats.kept} not in the catalog, kept`);
+  if (stats.conflicts) parts.push(`${stats.conflicts} not generated`);
   return parts.join(' · ');
 }
 function renderCompare() {
   const name = runnerName(compareRunner);
   $('compare-runner').textContent = name;
   const data = compareData;
-  const stats = data?.stats;
   $('compare-title').textContent = data ? `Generated ${name} config` : `${name} catalog`;
-  const apply = $('compare-apply');
-  const count = stats ? stats.added + stats.changed : 0;
-  apply.textContent = count ? `Apply ${count} route${count === 1 ? '' : 's'} to draft` : 'Nothing to apply';
-  apply.disabled = !count;
   $('compare-copy').disabled = !data;
+  const save = $('compare-save');
+  save.disabled = !data || busy || compareLoading || comparePending || compareSaving || !compareDirty || !!compareConflict;
+  save.textContent = compareConflict ? 'Save blocked' : 'Save';
+  $('compare-reload').disabled = busy || compareLoading || comparePending || compareSaving;
   $('compare-left-name').textContent = data ? `config.${data.provider}.generated.json · proposed` : 'generated';
   $('compare-right-name').textContent = data ? `config.json · models where provider=${data.provider}` : 'config.json';
   $('compare-note').hidden = !data?.note;
   $('compare-note').textContent = data?.note || '';
   const status = $('compare-status');
   status.hidden = false;
-  status.className = compareError ? 'runner-error' : 'hint';
-  status.textContent = compareLoading ? `Reading ${name}'s models…`
+  status.className = compareError || compareConflict ? 'runner-error' : 'hint';
+  status.textContent = compareLoading || comparePending ? `Reading ${name}'s models…`
     : compareError ? compareError
-    : data ? compareStatusText(data)
+    : compareConflict ? `${compareConflict} Reload to continue; the edits in this pane will be discarded.`
+    : data ? [compareStatusText(data), compareDirty ? 'edited here, not saved' : ''].filter(Boolean).join(' · ')
     : '';
-  $('compare-diff').hidden = !data;
   $('compare-files').hidden = !data;
-  if (!data) return;
+  $('compare-diff').hidden = !data;
+  if (!data) { $('compare-text').hidden = true; return; }
   const token = ++compareDiffToken;
   loadMonaco().then(monaco => {
     if (token !== compareDiffToken || tab !== 'compare') return;
@@ -655,7 +664,7 @@ function renderCompare() {
     status.hidden = false;
     status.className = 'runner-error';
     status.textContent = err.message || 'Could not load the diff editor.';
-    $('compare-text').textContent = `${data.generated}\n→ ${data.draft}`;
+    if (!compareDirty) $('compare-text').value = data.draft;
     $('compare-text').hidden = false;
   });
 }
@@ -663,20 +672,33 @@ let compareDiff, compareLeft, compareRight, compareDiffToken = 0;
 previewSideBySide.addEventListener('change', () => {
   compareDiff?.updateOptions({renderSideBySide: previewSideBySide.matches});
 });
-// The panes follow the previews' orientation: the generated file fills the
-// read-only left pane, this config fills the right pane, so additions read as
-// lines the left side has and the config does not.
+// comparePaneValue is the editable side: the modified model of the diff editor,
+// or the fallback textarea when Monaco is unavailable.
+function comparePaneValue() {
+  return compareDiff ? compareRight.getValue() : $('compare-text').value;
+}
+function compareSetDirty(value) {
+  compareDirty = !!compareData && value !== (compareData.draft || '');
+}
+function compareChanged() {
+  compareSetDirty(comparePaneValue());
+  renderCompare();
+  state();
+}
+// The panes follow the previews: the generated file fills the read-only left
+// pane, this config fills the editable right pane, so additions read as lines
+// the left side has and the config does not.
 function ensureCompareDiff(monaco, generatedText, draftText) {
   if (!compareDiff) {
     compareDiff = monaco.editor.createDiffEditor($('compare-diff'), {
-      readOnly: true,
+      readOnly: false,
       originalEditable: false,
       renderMarginRevertIcon: false,
       renderGutterMenu: false,
       useInlineViewWhenSpaceIsLimited: false,
       renderSideBySide: previewSideBySide.matches,
-      originalAriaLabel: 'Routes Apply would leave in this config, generated, read-only',
-      modifiedAriaLabel: 'Routes this config has today, read-only',
+      originalAriaLabel: `Generated ${compareData?.provider || ''} routes, read-only`,
+      modifiedAriaLabel: `On-disk ${compareData?.provider || ''} routes, editable`,
       automaticLayout: true,
       scrollBeyondLastLine: false,
       minimap: {enabled: false},
@@ -684,55 +706,131 @@ function ensureCompareDiff(monaco, generatedText, draftText) {
     });
     compareLeft = monaco.editor.createModel(generatedText, 'json');
     compareRight = monaco.editor.createModel(draftText, 'json');
+    compareRight.onDidChangeContent(() => compareChanged());
     compareDiff.setModel({original: compareLeft, modified: compareRight});
+    $('compare-text').hidden = true;
   } else {
     if (compareLeft.getValue() !== generatedText) compareLeft.setValue(generatedText);
-    if (compareRight.getValue() !== draftText) compareRight.setValue(draftText);
+    // A reload replaces the pane; edits made here are never overwritten by a
+    // re-render against the same data.
+    if (!compareDirty && compareRight.getValue() !== draftText) compareRight.setValue(draftText);
     compareDiff.updateOptions({renderSideBySide: previewSideBySide.matches});
   }
   compareDiff.layout();
 }
-// applyComparison merges the reviewed routes into the draft in place: additions
-// keep the position of the generated list (appended at the end of models[]), and
-// updates touch contextWindow only, so a curated displayName or reasoning block
-// is never rewritten by a catalog refresh.
-function applyComparison() {
-  const data = compareData;
-  if (!data) return;
+// compareSave writes the right pane back through the ordinary draft Save: the
+// pane's entries replace every route of this provider in the draft, so a
+// deletion is a deletion and an addition is an addition, and /api/save then
+// writes config.json with the same revision guard and backup as Save config.
+async function compareSave() {
+  if (busy || !compareData || comparePending || compareSaving || compareConflict) return;
+  const provider = compareData.provider;
+  const name = runnerName(compareRunner);
+  let entries;
+  try {
+    const value = JSON.parse(comparePaneValue());
+    if (!value || typeof value !== 'object' || Array.isArray(value) || !Array.isArray(value.models)) {
+      throw new Error('the pane must be an object with a models array');
+    }
+    for (const entry of value.models) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error('every models[] entry must be an object');
+      if (entry.provider !== provider) throw new Error(`every entry must set provider=${provider}`);
+    }
+    entries = value.models;
+  } catch (err) {
+    message(`Cannot save this pane: ${err.message}.`);
+    return;
+  }
   const doc = parsed();
   if (!doc || !Array.isArray(doc.models)) { message('Repair the JSON first.'); return; }
-  const key = (model) => model.clientModelName || model.providerModelName || '';
-  const byKey = new Map();
-  for (const model of doc.models) if (model && model.provider === data.provider) byKey.set(key(model), model);
-  let touched = 0;
-  for (const update of data.update || []) {
-    const model = byKey.get(update.key);
-    if (!model) continue;
-    model.contextWindow = update.contextWindow;
-    touched++;
+  const key = (model) => model && (model.clientModelName || model.providerModelName || '');
+  const beforeKeys = doc.models.filter(model => model && model.provider === provider).map(key);
+  const afterKeys = entries.map(key);
+  const removed = beforeKeys.filter(key => !afterKeys.includes(key));
+  const added = afterKeys.filter(key => !beforeKeys.includes(key));
+  if (removed.length && !confirm(`Save removes ${plural(removed.length, 'route')} from ${provider}: ${removed.join(', ')}. Continue?`)) return;
+  const remaining = [];
+  for (const model of doc.models) {
+    if (model && model.provider === provider) continue;
+    remaining.push(model);
   }
-  for (const route of data.add || []) {
-    if (!route || !route.providerModelName) continue;
-    if (byKey.has(key(route))) continue;
-    doc.models.push({...route});
-    touched++;
+  // Keep the block where this provider already had it; a provider with no
+  // routes yet lands at the end of models[].
+  const first = doc.models.findIndex(model => model && model.provider === provider);
+  const at = first < 0 ? remaining.length : doc.models.slice(0, first).filter(model => !(model && model.provider === provider)).length;
+  remaining.splice(at, 0, ...entries);
+  compareSaving = true;
+  renderCompare();
+  try {
+    changeObject({...doc, models: remaining});
+    await validate();
+    if (!report?.valid) { message('Fix the validation errors before saving.'); return; }
+    const result = await save();
+    if (!result.ok) {
+      // A stale revision means someone else wrote config.json: block Save and
+      // ask for a reload instead of overwriting their change.
+      if (/changed on disk/.test(result.error)) compareConflict = result.error;
+      return;
+    }
+    message(`${result.value.backup ? `Saved. Backup: ${result.value.backup}` : 'No file changes.'}` +
+      `\n${plural(entries.length, 'route')} for ${provider} written` +
+      (added.length ? `, ${added.length} added` : '') + (removed.length ? `, ${removed.length} removed` : '') + '.' +
+      `\nRestart the proxy separately to apply changes.`);
+    compareData = null;
+    compareDirty = false;
+    await loadCompare();
+  } finally {
+    compareSaving = false;
+    renderCompare();
+    state();
   }
-  if (!touched) { message('Nothing to apply.'); return; }
-  changeObject(doc);
-  tab = 'models';
-  render();
-  state();
-  message(`Applied ${touched} route${touched === 1 ? '' : 's'} from the ${runnerName(data.runner)} catalog to this draft. Review the diff in Raw JSON, then Save config.`);
+}
+// compareReload re-reads both sides: config.json (so the editable pane and the
+// revision Save guards with are current) and the runner's catalog. It also
+// works when the catalog is unavailable, which is the only way out of a stale
+// conflict.
+async function compareReload() {
+  if (busy || compareLoading || comparePending || compareSaving) return;
+  if (compareDirty && !confirm('Discard the edits in the on-disk pane and reload?')) return;
+  comparePending = true;
+  compareConflict = '';
+  renderCompare();
+  try {
+    const value = await api(`config?mergeNative=${mergeNativeEnabled() ? 'true' : 'false'}`);
+    clearTimeout(timer); generation++; fieldErrors.clear();
+    text = saved = value.text; revision = value.revision;
+    $('path').textContent = value.path;
+    $('raw').value = text;
+    selected = 0;
+    selectedVariant = selectedProvider = -1;
+    expandedModels.clear();
+    compareData = null;
+    compareDirty = false;
+    showReport(value.report);
+    await loadCompare();
+  } catch (err) {
+    message(err.message);
+  } finally {
+    comparePending = false;
+    renderCompare();
+    state();
+  }
+}
+// mayDiscardCompare guards every way out of the pane that would lose edits.
+function mayDiscardCompare() {
+  if (!compareDirty) return true;
+  return confirm('Discard the unsaved edits in the on-disk pane?');
 }
 $('catalog-refresh').onclick = () => { catalogRows = null; catalogError = ''; renderCatalogs(); };
-$('compare-back').onclick = () => { if (!mayDiscardFields()) return; tab = 'models'; render(); state(); validate(); };
-$('compare-refresh').onclick = loadCompare;
+$('compare-back').onclick = () => { if (!mayDiscardFields() || !mayDiscardCompare()) return; tab = 'models'; render(); state(); validate(); };
+$('compare-reload').onclick = compareReload;
+$('compare-save').onclick = compareSave;
+$('compare-text').oninput = () => { compareChanged(); };
 $('compare-copy').onclick = async () => {
   if (!compareData) return;
   try { await navigator.clipboard.writeText(compareData.generated); message('Generated routes copied.'); }
   catch (err) { message(err.message); }
 };
-$('compare-apply').onclick = applyComparison;
 
 function renderPreview() {
   const preview = report?.previews?.[previewRunner];
@@ -953,8 +1051,10 @@ async function load() {
     render(); showReport(value.report); message('');
   } catch (err) { message(err.message); }
 }
+// save reports its outcome so a caller that prepared the draft (the compare
+// pane) can tell a written file from a rejected one.
 async function save() {
-  if (busy || fieldErrors.size) return;
+  if (busy || fieldErrors.size) return {ok: false, error: 'Fix the pending fields before saving.'};
   busy = true; state();
   const submitted = text;
   try {
@@ -962,7 +1062,8 @@ async function save() {
     saved = submitted; revision = value.revision;
     if (text === submitted) showReport(value.report);
     message(value.backup ? `Saved. Backup: ${value.backup}\nRestart the proxy separately to apply changes.` : 'No file changes.');
-  } catch (err) { message(err.message); }
+    return {ok: true, value, submitted};
+  } catch (err) { message(err.message); return {ok: false, error: err.message}; }
   finally { busy = false; state(); }
 }
 function field(parent, doc, target, key, label, kind = 'text', choices = null) {
@@ -1345,7 +1446,7 @@ function render() {
   if(tab==='models')renderCatalogs();
   if(tab==='compare')openComparePanel();
 }
-document.querySelectorAll('[data-tab]').forEach(el=>el.onclick=()=>{if(!mayDiscardFields()||!mayDiscardSync())return;flushJSONToDraft();tab=el.dataset.tab;selected=0;selectedVariant=selectedProvider=-1;$('search').value='';render();state();validate();});
+document.querySelectorAll('[data-tab]').forEach(el=>el.onclick=()=>{if(!mayDiscardFields()||!mayDiscardSync()||!mayDiscardCompare())return;flushJSONToDraft();tab=el.dataset.tab;selected=0;selectedVariant=selectedProvider=-1;$('search').value='';render();state();validate();});
 $('add').onclick=()=>{
   if(!mayDiscardFields())return;flushJSONToDraft();const doc=parsed();if(!doc){message('Repair the JSON first.');return;}
   if(tab==='models'){addModel(doc,selectedProvider>=0?doc.providers?.[selectedProvider]?.name || '':doc.models?.[selected]?.provider || '');return;}
@@ -1355,7 +1456,7 @@ $('add').onclick=()=>{
 };
 $('search').oninput=()=>renderList(parsed());
 $('raw').oninput=()=>{text=$('raw').value;selected=0;selectedVariant=selectedProvider=-1;expandedModels.clear();changed();};
-$('reload').onclick=load;$('validate').onclick=validate;$('save').onclick=save;
+$('reload').onclick=()=>{if(!mayDiscardCompare())return;load();};$('validate').onclick=validate;$('save').onclick=save;
 $('diff').onclick=()=>{
   if(syncOpen&&!mayDiscardSync())return;
   syncOpen=!syncOpen;
@@ -1390,5 +1491,5 @@ $('dsh-credentials-add').onclick=async()=>{
   finally { busy = false; state(); }
 };
 $('download').onclick=()=>{const file=selectedPreviewFile();const mime=file.format==='yaml'?'text/yaml':file.format==='json'?'application/json':'application/toml';const url=URL.createObjectURL(new Blob([file.content],{type:mime}));const link=node('a');link.href=url;link.download=file.name;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
-window.addEventListener('beforeunload',event=>{if(text!==saved||fieldErrors.size||syncDirty){event.preventDefault();event.returnValue='';}});
+window.addEventListener('beforeunload',event=>{if(text!==saved||fieldErrors.size||syncDirty||compareDirty){event.preventDefault();event.returnValue='';}});
 load();

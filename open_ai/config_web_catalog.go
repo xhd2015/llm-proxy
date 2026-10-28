@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -463,19 +464,215 @@ func appendCatalogNote(note, extra string) string {
 	return note + " " + extra
 }
 
-// catalogFragmentText renders routes as the config fragment both diff panes
-// show, with the same envelope as config.json.
-func catalogFragmentText(routes []catalogRoute) string {
-	if routes == nil {
-		routes = []catalogRoute{}
+// catalogModelObject is one models[] entry of a config, kept as its members in
+// the order the file writes them. The panes are editable and Save splices the
+// edited entries back into config.json, so the field order the reader curated
+// has to survive: a map would alphabetize every route it touches.
+type catalogModelObject struct {
+	keys   []string
+	values map[string]json.RawMessage
+}
+
+// catalogParseObject splits one models[] entry into ordered members.
+func catalogParseObject(raw json.RawMessage) (catalogModelObject, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if _, err := decoder.Token(); err != nil {
+		return catalogModelObject{}, err
 	}
-	data, err := json.MarshalIndent(struct {
-		Models []catalogRoute `json:"models"`
-	}{Models: routes}, "", "  ")
+	object := catalogModelObject{values: make(map[string]json.RawMessage)}
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return catalogModelObject{}, err
+		}
+		key, ok := token.(string)
+		if !ok {
+			return catalogModelObject{}, fmt.Errorf("model entry has a non-string key")
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return catalogModelObject{}, err
+		}
+		object.keys = append(object.keys, key)
+		object.values[key] = value
+	}
+	return object, nil
+}
+
+// string returns a string member, or "" when it is absent or not a string.
+func (object catalogModelObject) string(key string) string {
+	var value string
+	if err := json.Unmarshal(object.values[key], &value); err != nil {
+		return ""
+	}
+	return value
+}
+
+// key returns the name the route is served under, matching catalogRouteKey.
+func (object catalogModelObject) key() string {
+	if name := object.string("clientModelName"); name != "" {
+		return name
+	}
+	return object.string("providerModelName")
+}
+
+// with returns a copy carrying an updated member, keeping its position.
+func (object catalogModelObject) with(key string, value any) catalogModelObject {
+	raw, err := json.Marshal(value)
 	if err != nil {
-		return "{\"models\": []}\n"
+		return object
 	}
-	return string(data) + "\n"
+	next := catalogModelObject{
+		keys:   append([]string(nil), object.keys...),
+		values: make(map[string]json.RawMessage, len(object.values)+1),
+	}
+	for name, current := range object.values {
+		next.values[name] = current
+	}
+	if _, ok := next.values[key]; !ok {
+		next.keys = append(next.keys, key)
+	}
+	next.values[key] = raw
+	return next
+}
+
+// text renders the entry indented one level inside a models[] array.
+func (object catalogModelObject) text(prefix string) string {
+	var out bytes.Buffer
+	out.WriteString("{")
+	written := 0
+	for _, key := range object.keys {
+		value, ok := object.values[key]
+		if !ok {
+			continue
+		}
+		name, err := json.Marshal(key)
+		if err != nil {
+			continue
+		}
+		if written > 0 {
+			out.WriteString(",")
+		}
+		written++
+		out.Write(name)
+		out.WriteString(":")
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, value); err != nil {
+			compact.Reset()
+			compact.Write(value)
+		}
+		out.Write(compact.Bytes())
+	}
+	out.WriteString("}")
+	var indented bytes.Buffer
+	if err := json.Indent(&indented, out.Bytes(), prefix, "  "); err != nil {
+		return prefix + out.String()
+	}
+	return prefix + indented.String()
+}
+
+// catalogObjectOrder is the field order config.json writes for a model entry,
+// so generated routes read like the routes around them.
+var catalogObjectOrder = []string{
+	"protocol", "provider", "providerModelName", "clientModelName",
+	"displayName", "contextWindow", "maxTokens", "reasoning", "inputs", "compat",
+}
+
+// catalogObjectFromMap orders a generated entry the way config.json does.
+func catalogObjectFromMap(values map[string]any) catalogModelObject {
+	object := catalogModelObject{values: make(map[string]json.RawMessage, len(values))}
+	add := func(key string) {
+		value, ok := values[key]
+		if !ok {
+			return
+		}
+		raw, err := json.Marshal(value)
+		if err != nil {
+			return
+		}
+		object.keys = append(object.keys, key)
+		object.values[key] = raw
+	}
+	for _, key := range catalogObjectOrder {
+		add(key)
+	}
+	var rest []string
+	for key := range values {
+		if _, ok := object.values[key]; !ok {
+			rest = append(rest, key)
+		}
+	}
+	sort.Strings(rest)
+	for _, key := range rest {
+		add(key)
+	}
+	return object
+}
+
+// catalogModelObjects returns the models[] entries of text that provider
+// serves, in file order and with every field the file spells.
+func catalogModelObjects(text, provider string) ([]catalogModelObject, error) {
+	var raw struct {
+		Models []json.RawMessage `json:"models"`
+	}
+	if err := json.Unmarshal([]byte(text), &raw); err != nil {
+		return nil, err
+	}
+	objects := make([]catalogModelObject, 0, len(raw.Models))
+	for _, entry := range raw.Models {
+		object, err := catalogParseObject(entry)
+		if err != nil {
+			return nil, err
+		}
+		if object.string("provider") != provider {
+			continue
+		}
+		objects = append(objects, object)
+	}
+	return objects, nil
+}
+
+// catalogGeneratedObjects applies the catalog's context windows to the draft's
+// entries and appends the routes the catalog adds.
+func catalogGeneratedObjects(draft []catalogModelObject, updates []catalogContextUpdate, adds []map[string]any) []catalogModelObject {
+	windows := make(map[string]any, len(updates))
+	for _, update := range updates {
+		if update.ContextWindow != nil {
+			windows[update.Key] = *update.ContextWindow
+		}
+	}
+	objects := make([]catalogModelObject, 0, len(draft)+len(adds))
+	for _, object := range draft {
+		if window, ok := windows[object.key()]; ok {
+			object = object.with("contextWindow", window)
+		}
+		objects = append(objects, object)
+	}
+	for _, add := range adds {
+		objects = append(objects, catalogObjectFromMap(add))
+	}
+	return objects
+}
+
+// catalogFragmentText renders entries as the config fragment both diff panes
+// show, with the same envelope as config.json.
+func catalogFragmentText(objects []catalogModelObject) string {
+	var out strings.Builder
+	out.WriteString("{\n  \"models\": [")
+	if len(objects) == 0 {
+		out.WriteString("]\n}\n")
+		return out.String()
+	}
+	out.WriteString("\n")
+	for i, object := range objects {
+		out.WriteString(object.text("    "))
+		if i < len(objects)-1 {
+			out.WriteString(",")
+		}
+		out.WriteString("\n")
+	}
+	out.WriteString("  ]\n}\n")
+	return out.String()
 }
 
 type catalogStats struct {
@@ -491,26 +688,23 @@ type catalogStats struct {
 }
 
 type catalogCompareResponse struct {
-	Runner       string                 `json:"runner"`
-	Provider     string                 `json:"provider"`
-	ProviderKind string                 `json:"providerKind"`
-	Source       string                 `json:"source"`
-	Version      string                 `json:"version"`
-	FetchedAt    string                 `json:"fetchedAt"`
-	Note         string                 `json:"note,omitempty"`
-	Generated    string                 `json:"generated"`
-	Draft        string                 `json:"draft"`
-	Stats        catalogStats           `json:"stats"`
-	Add          []map[string]any       `json:"add"`
-	Update       []catalogContextUpdate `json:"update"`
+	Runner       string       `json:"runner"`
+	Provider     string       `json:"provider"`
+	ProviderKind string       `json:"providerKind"`
+	Source       string       `json:"source"`
+	Version      string       `json:"version"`
+	FetchedAt    string       `json:"fetchedAt"`
+	Note         string       `json:"note,omitempty"`
+	Generated    string       `json:"generated"`
+	Draft        string       `json:"draft"`
+	Stats        catalogStats `json:"stats"`
 }
 
-// catalogAddObjects returns the model objects Apply appends for routes the
-// config does not serve yet. The diff panes are abridged to the fields this
-// page changes, so the objects are completed here with the shape a valid
-// route needs: inputs, reasoning and compat are copied from the provider's
-// first existing route, and reasoning falls back to disabled when the
-// provider has no route to copy yet.
+// catalogAddObjects returns the model objects generated for routes the config
+// does not serve yet. A generated object needs the shape a valid route needs:
+// inputs, reasoning and compat are copied from the provider's first existing
+// route, and reasoning falls back to disabled when the provider has no route
+// to copy yet.
 func catalogAddObjects(doc proxyConfig, routes []catalogRoute) []map[string]any {
 	objects := make([]map[string]any, 0, len(routes))
 	for _, route := range routes {
@@ -566,7 +760,20 @@ func catalogRouteTemplate(doc proxyConfig, provider, protocol string) (configMod
 	return configModel{}, false
 }
 
-func newCatalogCompareResponse(doc proxyConfig, result catalogComparison) catalogCompareResponse {
+// newCatalogCompareResponse renders both panes from the config text itself, so
+// they carry every field a route has and Save can write them back unchanged.
+func newCatalogCompareResponse(doc proxyConfig, result catalogComparison, text string) (catalogCompareResponse, error) {
+	draft, err := catalogModelObjects(text, result.Provider)
+	if err != nil {
+		return catalogCompareResponse{}, err
+	}
+	if len(draft) != len(result.Draft) {
+		return catalogCompareResponse{}, fmt.Errorf("read %d %q entries from the config but counted %d", len(draft), result.Provider, len(result.Draft))
+	}
+	generated := catalogGeneratedObjects(draft, result.Update, catalogAddObjects(doc, result.Add))
+	if len(generated) != len(result.Generated) {
+		return catalogCompareResponse{}, fmt.Errorf("generated %d %q entries but counted %d", len(generated), result.Provider, len(result.Generated))
+	}
 	return catalogCompareResponse{
 		Runner:       result.Runner,
 		Provider:     result.Provider,
@@ -575,8 +782,8 @@ func newCatalogCompareResponse(doc proxyConfig, result catalogComparison) catalo
 		Version:      result.Version,
 		FetchedAt:    result.FetchedAt,
 		Note:         result.Note,
-		Generated:    catalogFragmentText(result.Generated),
-		Draft:        catalogFragmentText(result.Draft),
+		Generated:    catalogFragmentText(generated),
+		Draft:        catalogFragmentText(draft),
 		Stats: catalogStats{
 			Total:     result.Models,
 			Visible:   result.Models - result.Hidden,
@@ -588,9 +795,7 @@ func newCatalogCompareResponse(doc proxyConfig, result catalogComparison) catalo
 			Kept:      result.Kept,
 			Conflicts: result.Conflicts,
 		},
-		Add:    catalogAddObjects(doc, result.Add),
-		Update: result.Update,
-	}
+	}, nil
 }
 
 type catalogSummary struct {
@@ -666,7 +871,12 @@ func handleConfigWebCatalog(w http.ResponseWriter, r *http.Request, text, runner
 			http.Error(w, err.Error(), http.StatusConflict)
 			return true
 		}
-		writeConfigWebJSON(w, 200, newCatalogCompareResponse(doc, result))
+		response, err := newCatalogCompareResponse(doc, result, text)
+		if err != nil {
+			http.Error(w, "cannot read the models[] entries: "+err.Error(), http.StatusUnprocessableEntity)
+			return true
+		}
+		writeConfigWebJSON(w, 200, response)
 		return true
 	}
 	return false

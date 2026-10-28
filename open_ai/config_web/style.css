@@ -103,4 +103,4 @@ fieldset { border: 1px solid var(--border); border-radius: 8px; padding: 16px; m
 .file-card code { font: 12px/1.6 ui-monospace, monospace; color: var(--text); overflow-wrap: anywhere; }
 #compare-status { margin: 8px 0; font-size: 12px; line-height: 1.55; white-space: pre-line; }
 #compare-diff { height: 62vh; min-height: 360px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--surface); }
-#compare-text { margin: 0; }
+#compare-text { min-height: 62vh; border-radius: 0; border-width: 1px 0 0; }

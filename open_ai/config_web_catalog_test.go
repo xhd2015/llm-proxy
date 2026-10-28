@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -18,6 +19,17 @@ func catalogTestSource() catalogSource {
 			{ID: "gpt-reserve", Name: "GPT Reserve", ContextWindow: 272000, Hidden: true},
 		},
 	}
+}
+
+// catalogTestConfigText renders the config the way the editor holds it, so the
+// panes are built from the same text a browser would submit.
+func catalogTestConfigText(t *testing.T, doc proxyConfig) string {
+	t.Helper()
+	data, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	return string(data)
 }
 
 func catalogTestConfig() proxyConfig {
@@ -208,13 +220,11 @@ func TestCatalogFragmentText(t *testing.T) {
 	if got != "{\n  \"models\": []\n}\n" {
 		t.Fatalf("empty fragment = %q", got)
 	}
-	got = catalogFragmentText([]catalogRoute{{
-		Protocol:          "openai-responses",
-		Provider:          "codex",
-		ProviderModelName: "gpt-6-sol",
-		DisplayName:       "GPT-6 Sol",
-		ContextWindow:     intPtr(272000),
-	}})
+	objects, err := catalogModelObjects(`{"models": [{"protocol": "openai-responses", "provider": "codex", "providerModelName": "gpt-6-sol", "displayName": "GPT-6 Sol", "contextWindow": 272000}]}`, "codex")
+	if err != nil {
+		t.Fatalf("catalogModelObjects: %v", err)
+	}
+	got = catalogFragmentText(objects)
 	want := `{
   "models": [
     {
@@ -232,6 +242,85 @@ func TestCatalogFragmentText(t *testing.T) {
 	}
 }
 
+func TestCatalogModelObjectsKeepFileOrderAndEveryField(t *testing.T) {
+	text := `{"models": [
+		{"protocol": "openai-responses", "provider": "codex", "providerModelName": "gpt-6-astra", "maxTokens": 32000, "reasoning": {"defaultEffort": "high"}, "contextWindow": 1000},
+		{"protocol": "openai-responses", "provider": "ais", "providerModelName": "gpt-6-sol"},
+		{"protocol": "openai-responses", "provider": "codex", "providerModelName": "gpt-5.6-sol", "variants": [{"clientModelName": "gpt-5.6-sol-fast"}]}
+	]}`
+	objects, err := catalogModelObjects(text, "codex")
+	if err != nil {
+		t.Fatalf("catalogModelObjects: %v", err)
+	}
+	if len(objects) != 2 {
+		t.Fatalf("objects = %d; want the two codex entries", len(objects))
+	}
+	fragment := catalogFragmentText(objects)
+	want := `{
+  "models": [
+    {
+      "protocol": "openai-responses",
+      "provider": "codex",
+      "providerModelName": "gpt-6-astra",
+      "maxTokens": 32000,
+      "reasoning": {
+        "defaultEffort": "high"
+      },
+      "contextWindow": 1000
+    },
+    {
+      "protocol": "openai-responses",
+      "provider": "codex",
+      "providerModelName": "gpt-5.6-sol",
+      "variants": [
+        {
+          "clientModelName": "gpt-5.6-sol-fast"
+        }
+      ]
+    }
+  ]
+}
+`
+	if fragment != want {
+		t.Fatalf("fragment =\n%s\nwant\n%s", fragment, want)
+	}
+}
+
+func TestCatalogGeneratedObjectsRefreshWindowsAndAppendAdds(t *testing.T) {
+	text := `{"models": [
+		{"protocol": "openai-responses", "provider": "codex", "providerModelName": "gpt-6-astra", "maxTokens": 32000, "contextWindow": 1000}
+	]}`
+	doc := catalogTestConfig()
+	doc.Models = doc.Models[:1]
+	doc.Models[0].ContextWindow = intPtr(1000)
+	doc.Models[0].MaxTokens = intPtr(32000)
+	result, err := compareCatalogSource(doc, catalogTestSource())
+	if err != nil {
+		t.Fatalf("compareCatalogSource: %v", err)
+	}
+	objects, err := catalogModelObjects(text, "codex")
+	if err != nil {
+		t.Fatalf("catalogModelObjects: %v", err)
+	}
+	generated := catalogGeneratedObjects(objects, result.Update, catalogAddObjects(doc, result.Add))
+	fragment := catalogFragmentText(generated)
+	if !strings.Contains(fragment, `"maxTokens": 32000`) {
+		t.Fatalf("generated fragment dropped a curated field:\n%s", fragment)
+	}
+	if !strings.Contains(fragment, `"contextWindow": 272000`) {
+		t.Fatalf("generated fragment kept the stale window:\n%s", fragment)
+	}
+	if strings.Contains(fragment, `"contextWindow": 1000`) {
+		t.Fatalf("generated fragment kept the stale 1000:\n%s", fragment)
+	}
+	if !strings.Contains(fragment, `"providerModelName": "gpt-6-astra"`) || !strings.Contains(fragment, `"providerModelName": "gpt-6-sol"`) {
+		t.Fatalf("generated fragment misses an entry:\n%s", fragment)
+	}
+	if strings.LastIndex(fragment, `"providerModelName": "gpt-6-sol"`) < strings.Index(fragment, `"gpt-6-astra"`) {
+		t.Fatalf("the addition is not appended after the draft's entries:\n%s", fragment)
+	}
+}
+
 func TestCatalogNameKeyIgnoresPunctuationAndCase(t *testing.T) {
 	if catalogNameKey("GPT-6 Astra") != catalogNameKey("gpt6astra") {
 		t.Fatalf("display name normalization regressed")
@@ -246,7 +335,10 @@ func TestNewCatalogCompareResponseStats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compareCatalogSource: %v", err)
 	}
-	response := newCatalogCompareResponse(doc, result)
+	response, err := newCatalogCompareResponse(doc, result, catalogTestConfigText(t, doc))
+	if err != nil {
+		t.Fatalf("newCatalogCompareResponse: %v", err)
+	}
 	if response.Stats.Total != 3 || response.Stats.Visible != 2 || response.Stats.Hidden != 1 {
 		t.Fatalf("stats = %+v", response.Stats)
 	}
