@@ -12,7 +12,8 @@ llm-proxy lint --config ~/.config/llm-proxy/config.json
 The complete runnable form is [`config.example.json`](config.example.json). A model route is selected by its effective `clientModelName`. When that field
 is omitted on a base model, it defaults to `providerModelName`. Every effective
 client model name, including each variant, must be unique across the whole
-configuration.
+configuration. See [Route names vs upstream names](#route-names-vs-upstream-names)
+for when that default should not be overridden.
 
 `lint` validates JSON fields and types, provider references, model metadata, and resolved route names without modifying files or contacting providers. It reports independent errors with field paths on stderr and exits 1. Invalid provider declarations suppress dependent protocol errors. A config valid for serving but unavailable for DSH export produces a warning and exits 0. Success prints provider and route counts on stdout. Both `lint --config FILE` and `--config FILE lint` are supported; `lint --help` requires no config file.
 
@@ -104,7 +105,7 @@ hits `/v1/responses` on that same origin. Variants cannot change `protocol` or
 `providerModelName`, so a gateway that speaks both protocols needs two base
 models on that one provider — `anthropic-messages` with the names DSH already
 uses (AIS Claude aliases such as `claude-fable-5`), and `openai-responses` with
-the gateway's native Responses ids (AIS: `llm-gateway--glm-5.2`). The Responses
+the gateway's native Responses ids (AIS: `llm-gateway--glm-5.3`). The Responses
 bases export to Codex like any other `openai-responses` route; do not set
 `protocolAdapter` on them. Unadapted Anthropic bases stay DSH-only and appear
 in the Codex preview hint.
@@ -163,6 +164,40 @@ output. If no variant matches, the base model is printed.
 `codex-models` emits a `~/.codex/config.toml` snippet with the provider block and the default `model`, followed after a `# ----- Model catalog -----` delimiter by a Codex model catalog JSON. Saving that JSON as `~/.codex/llm-proxy-codex.json` makes every exported model switchable in Codex's `/model` picker with display names, context windows, and reasoning levels. The catalog has one entry per exported route: `slug` is the client model name, reasoning levels are the route's `effortsMapping` keys that Codex accepts (`minimal`, `low`, `medium`, `high`, `xhigh`), the default level is `defaultEffort` when Codex supports it, and `context_window` and `input_modalities` mirror the route metadata. Routes exported for Codex are the `openai-responses` routes plus anthropic-messages models that set `protocolAdapter: "anthropic2openai"`; models whose provider kind is `codex` remain excluded, and the preview notes unadapted anthropic-messages models with the setting that would include them.
 
 By default the catalog also includes the native models captured from the Codex binary's bundled catalog (`codex debug models --bundled`), so enabling `model_catalog_json` keeps the built-in GPT models pickable alongside the proxy models: proxy entries come first, slug collisions resolve in favor of the proxy route, and picker priorities are reassigned sequentially. The plain `codex debug models` refresh is deliberately not consulted: once `model_catalog_json` is installed it renders that catalog instead of the native one, which would make the capture self-referential. Because the merged catalog is a superset of Codex's own picker, the generated TOML emits `model_catalog_json` uncommented; the comment records the Codex version the native models were captured from — regenerate the export after upgrading Codex. Proxy models also get a real agent prompt: codex requires `base_instructions` on every catalog entry, and the export derives it from the shortest bundled prompt with the GPT identity header replaced by a model-neutral one ("You are Codex, a coding agent. You and the user share one workspace, ..."), so third-party models receive codex's operating guidance (editing constraints, autonomy, skills, communication rules) without GPT identity. A model or variant may set `baseInstructions` to override the prompt outright; without a bundled capture the entry falls back to the minimal "You are Codex, a coding agent.". If the capture adds no models (codex missing, or every native entry collides with a proxy route), the export degrades to proxy-only with a truthful comment, a `warning:` on stderr (exit code stays 0), and a diagnostics warning in the editor. `--no-merge-native` emits a proxy-only catalog directly and comments the `model_catalog_json` line again (a proxy-only catalog replaces the whole picker, dropping the built-in models). The web editor's Codex preview has the same behavior behind a `Merge Native` checkbox (default on, remembered per browser); it captures the bundled catalog once per editor process, and the catalog preview file carries a note reporting how many native models were merged. The editor encodes the current tab, preview runner, and preview file in the URL (`?tab=preview&runner=codex&file=llm-proxy-codex.json`) so a link reopens that view. The Models tab also encodes the open model (`?model=<clientModelName>`; a variant uses the variant's client name and a base model with an empty client name falls back to `providerModelName`), so a link or reload reopens the same model with its branch expanded, and an unknown name selects the first model. A `Form` / `JSON` switch on the model header swaps the field grid for a Monaco JSON editor over exactly that model or variant object (the variant links are the `variants` key inside the base JSON). The JSON editor is served the same vendored bundle as the preview diff and is backed by `/model.schema.json`: property names complete as you type, unknown keys and wrong enum values are marked as errors, and valid input replaces the draft immediately while invalid input leaves the last valid model in place until the JSON parses again. `edit=json` stays in the URL while JSON mode is open, so reload and the next model open in JSON too; returning to `Form` with invalid JSON is refused until it parses. The Codex preview reads on-disk `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`) and shows at most two warnings when `model_provider` is not `"llm-proxy"` or `model_catalog_json` does not point at the generated catalog file. Selecting the `llm-proxy-codex.json` preview file shows an install button that writes the generated catalog to `$CODEX_HOME/llm-proxy-codex.json` (or `~/.codex/llm-proxy-codex.json`): `Create` when the file does not exist, `Update` when it differs from the generated content, and a disabled `Updated` once it matches. The button writes exactly what the preview shows — the current draft and merge state — atomically, and is a no-op when the file is already identical. The proxy serves upstream credentials itself, so the generated snippet carries no auth keys and never sets `requires_openai_auth`.
+
+## Route names vs upstream names
+
+`clientModelName` is what a client asks the proxy for; `providerModelName` is
+what the proxy sends upstream. Omitting `clientModelName` makes them equal,
+which is the honest default: the name you call is the name the gateway
+receives. Set `clientModelName` only when you want an alias, and remember the
+alias exists nowhere upstream — gateway logs, gateway-side routing, and
+per-model pricing all see `providerModelName`.
+
+An alias is actively misleading when the gateway rewrites whatever it receives.
+AIS Switch maps a requested Claude id through its role map
+(`ANTHROPIC_DEFAULT_<ROLE>_MODEL`), so asking for `claude-opus-5-5` runs
+`glm-5.3-flash`. A route named after the model you want then promises something
+the proxy cannot keep. Prefer the identity form:
+
+```json
+{"protocol": "anthropic-messages", "provider": "ais", "providerModelName": "glm-5.3-flash"},
+{"protocol": "openai-responses", "provider": "ais", "providerModelName": "llm-gateway--glm-5.3"}
+```
+
+Both are names AIS serves as-is: on the Claude surface the role-map targets and
+the `[1M]`-free pool models, on the Codex surface the ids from `GET /v1/models`.
+Keep `displayName` for the human label — it is what the Codex picker shows — and
+let it carry the mapping when one exists, as in
+`"AIS - claude-fable-5 (runs glm-5.3-flash)"`. When a route must ask for a
+Claude alias, name the route after that alias and put the real model in
+`displayName`, so neither name lies.
+
+`marcus ais-proxy doctor --config ~/.config/llm-proxy/config.json` (from the spl
+CLI) reports every route whose client name differs from its upstream name and
+every route whose upstream model AIS cannot serve. `marcus ais-proxy config
+llm-proxy update` prints the corrected file to stdout, so it can be diffed before
+it is used, and `-w` replaces the file in place, keeping one `.bak` copy.
 
 ## Browser editor
 
