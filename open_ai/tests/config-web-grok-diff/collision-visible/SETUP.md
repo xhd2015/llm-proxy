@@ -4,15 +4,15 @@
 
 ```
 # same id, different proxy -> both panes show it
-configText + exportText -> ConfigWebGrokDiff -> ais-glm-5-2 in both regions
+configText + exportText -> ConfigWebGrokDiff -> gateway-b-glm-5-2 in both regions
 ```
 
 ## Preconditions
 
-- The file routes `ais-glm-5-2` at `127.0.0.1:15722` with
+- The file routes `gateway-b-glm-5-2` at `127.0.0.1:15722` with
   `model = "claude-fable-5"` and an `api_key`.
 - The export routes the same id at `127.0.0.1:8890` with
-  `model = "ais-glm-5-2"`.
+  `model = "gateway-b-glm-5-2"`.
 
 ## Steps
 

@@ -239,7 +239,7 @@ func TestClampPreservesLongTextButRemovesDataAndBase64Payloads(t *testing.T) {
 		t.Fatal("long text must be preserved")
 	}
 	for _, key := range []string{"data_url", "raw"} {
-		if got, _ := typed[key].(string); !strings.HasPrefix(got, "[cc-switch: omitted ") {
+		if got, _ := typed[key].(string); !strings.HasPrefix(got, "[omitted ") {
 			t.Fatalf("%s = %q", key, got)
 		}
 	}

@@ -3,6 +3,7 @@ package openai
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -534,12 +535,37 @@ func groupDSHRoutes(routes []effectiveRoute) []dshProviderGroup {
 		if providerProtocolCounts[parts[0]] > 1 {
 			backend := parts[1]
 			group.name += "-" + backend
+			group.display += " · " + backend
 		}
 		group.reasoning = sharedDSHReasoning(group.routes)
 		group.routes = sortRoutes(group.routes)
 		groups = append(groups, *group)
 	}
 	sort.Slice(groups, func(i, j int) bool { return groups[i].name < groups[j].name })
+	// Different configured providers may share a port and a display label too.
+	counts := map[string]int{}
+	for _, group := range groups {
+		counts[group.display]++
+	}
+	for i := range groups {
+		if counts[groups[i].display] > 1 {
+			groups[i].display += " · " + groups[i].protocol
+		}
+	}
+	counts = map[string]int{}
+	for _, group := range groups {
+		counts[group.display]++
+	}
+	for i := range groups {
+		if counts[groups[i].display] < 2 {
+			continue
+		}
+		provider := groups[i].routes[0].provider
+		applySelectedCredential(&provider)
+		if endpoint, err := url.Parse(provider.BaseURL); err == nil && endpoint.Host != "" {
+			groups[i].display += " · " + endpoint.Host + strings.TrimRight(endpoint.Path, "/")
+		}
+	}
 	return groups
 }
 
@@ -585,7 +611,13 @@ func dshProviderDisplayName(provider configProvider) string {
 	case "grok":
 		return "Grok"
 	case "http-proxy":
-		return strings.ToUpper(provider.Name)
+		// Labels depend only on the selected endpoint, never on credentials or
+		// a live probe. Export must also work when a token file is unavailable.
+		applySelectedCredential(&provider)
+		if label := httpProxyBaseLabel(provider.BaseURL); label != "" {
+			return label
+		}
+		return "http-proxy"
 	default:
 		return provider.Name
 	}

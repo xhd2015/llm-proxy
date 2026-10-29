@@ -140,7 +140,7 @@ func TestConfigHandlerForceAdaptiveThinkingWithoutModelMatch(t *testing.T) {
 
 func TestGenerateConfigDSHModelsInjectsAdaptiveThinking(t *testing.T) {
 	routes := []effectiveRoute{{
-		provider:          configProvider{Name: "compass-api", Kind: "http-proxy"},
+		provider:          configProvider{Name: "gateway-a", Kind: "http-proxy"},
 		protocol:          "anthropic-messages",
 		clientModelName:   "claude-opus-5-5",
 		providerModelName: "claude-opus-5-5",
@@ -159,7 +159,7 @@ func TestGenerateConfigDSHModelsInjectsAdaptiveThinking(t *testing.T) {
 
 func TestGenerateConfigDSHModelsRespectsExplicitAdaptiveFlag(t *testing.T) {
 	routes := []effectiveRoute{{
-		provider:          configProvider{Name: "compass-api", Kind: "http-proxy"},
+		provider:          configProvider{Name: "gateway-a", Kind: "http-proxy"},
 		protocol:          "anthropic-messages",
 		clientModelName:   "claude-opus-5-5",
 		providerModelName: "claude-opus-5-5",
@@ -279,7 +279,7 @@ func TestGenerateConfigDSHModelsRendersMetadata(t *testing.T) {
 func TestGenerateConfigDSHModelsQuotesUserStrings(t *testing.T) {
 	label := "Gateway: coding #1\nSecond line"
 	routes := []effectiveRoute{{
-		provider:        configProvider{Name: "gateway: local", Kind: "http-proxy"},
+		provider:        configProvider{Name: "gateway: local", Kind: "http-proxy", BaseURL: "http://127.0.0.1:15721/v1"},
 		protocol:        "openai-responses",
 		clientModelName: "false",
 		displayName:     label,
@@ -297,7 +297,7 @@ func TestGenerateConfigDSHModelsQuotesUserStrings(t *testing.T) {
 	config := patches[0]["config"].(map[string]any)
 	providers := config["providers"].(map[string]any)
 	provider := providers["llm-proxy-gateway: local"].(map[string]any)
-	if provider["displayName"] != "GATEWAY: LOCAL (llm-proxy)" {
+	if provider["displayName"] != "http-proxy :15721 (llm-proxy)" {
 		t.Fatalf("provider label changed: %v", provider["displayName"])
 	}
 	models := provider["models"].([]any)
@@ -410,17 +410,17 @@ func TestCodexExportIncludesHTTPProxyResponses(t *testing.T) {
 	config := proxyConfig{
 		Listen: "127.0.0.1:8890",
 		Providers: []configProvider{{
-			Name: "ais", Kind: "http-proxy", BaseURL: "http://127.0.0.1:15721/v1", DummyToken: "PROXY_MANAGED",
+			Name: "gateway-b", Kind: "http-proxy", BaseURL: "http://127.0.0.1:15721/v1", DummyToken: "PROXY_MANAGED",
 		}},
 		Models: []configModel{
 			{
-				Protocol: "anthropic-messages", Provider: "ais", ProviderModelName: "claude-fable-5",
-				ClientModelName: "ais-glm-5-2", DisplayName: "AIS - GLM-5.2",
+				Protocol: "anthropic-messages", Provider: "gateway-b", ProviderModelName: "claude-fable-5",
+				ClientModelName: "gateway-b-glm-5-2", DisplayName: "Gateway B - GLM-5.2",
 				Reasoning: &configReasoning{Disabled: true},
 			},
 			{
-				Protocol: "openai-responses", Provider: "ais", ProviderModelName: "llm-gateway--glm-5.2",
-				ClientModelName: "ais-glm-5-2-from-codex", DisplayName: "AIS - GLM-5.2",
+				Protocol: "openai-responses", Provider: "gateway-b", ProviderModelName: "route--glm-5.2",
+				ClientModelName: "gateway-b-glm-5-2-from-codex", DisplayName: "Gateway B - GLM-5.2",
 				Reasoning: &configReasoning{Disabled: true},
 			},
 		},
@@ -433,23 +433,23 @@ func TestCodexExportIncludesHTTPProxyResponses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output, "#   ais-glm-5-2-from-codex\n") || !strings.Contains(output, `model = "ais-glm-5-2-from-codex"`) {
+	if !strings.Contains(output, "#   gateway-b-glm-5-2-from-codex\n") || !strings.Contains(output, `model = "gateway-b-glm-5-2-from-codex"`) {
 		t.Fatalf("http-proxy Responses route missing from Codex export:\n%s", output)
 	}
-	if strings.Contains(output, "#   ais-glm-5-2\n") || strings.Contains(output, "model = \"ais-glm-5-2\"\n") {
-		t.Fatalf("unadapted Anthropic AIS route must not be a Codex model:\n%s", output)
+	if strings.Contains(output, "#   gateway-b-glm-5-2\n") || strings.Contains(output, "model = \"gateway-b-glm-5-2\"\n") {
+		t.Fatalf("unadapted Anthropic Gateway B route must not be a Codex model:\n%s", output)
 	}
-	if !strings.Contains(output, "# Not exported (anthropic-messages): ais-glm-5-2\n") {
-		t.Fatalf("unadapted Anthropic AIS route must stay in the adapter hint:\n%s", output)
+	if !strings.Contains(output, "# Not exported (anthropic-messages): gateway-b-glm-5-2\n") {
+		t.Fatalf("unadapted Anthropic Gateway B route must stay in the adapter hint:\n%s", output)
 	}
 	catalog, err := generateConfigCodexCatalog(config.Listen, routes)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(catalog, `"slug": "ais-glm-5-2-from-codex"`) {
+	if !strings.Contains(catalog, `"slug": "gateway-b-glm-5-2-from-codex"`) {
 		t.Fatalf("catalog missing http-proxy Responses slug:\n%s", catalog)
 	}
-	if strings.Contains(catalog, `"slug": "ais-glm-5-2"`) {
+	if strings.Contains(catalog, `"slug": "gateway-b-glm-5-2"`) {
 		t.Fatalf("catalog must not include the unadapted Anthropic slug:\n%s", catalog)
 	}
 }

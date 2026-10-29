@@ -160,7 +160,7 @@ func inspectConfigWebDraft(text string, options configModelsOptions) configWebRe
 				preview.Format = "yaml"
 			}
 			if runner == "codex" {
-				preview.Warnings = inspectCodexUserConfig()
+				preview.Warnings = inspectCodexUserConfig(config.Listen)
 				export, err := generateCodexExport(config.Listen, routes, options)
 				if err != nil {
 					preview.Error = err.Error()
@@ -290,7 +290,7 @@ func newConfigWebHandlerWithNative(store *configWebStore, host string, native *n
 			return
 		}
 		switch r.URL.Path {
-		case "/api/validate", "/api/save", "/api/catalog", "/api/diff", "/api/sync", "/api/credentials", "/api/catalog-summary", "/api/catalog-compare", "/api/catalog-refresh":
+		case "/api/validate", "/api/save", "/api/catalog", "/api/diff", "/api/sync", "/api/credentials", "/api/catalog-summary", "/api/catalog-compare", "/api/catalog-refresh", "/api/catalog-probe":
 		default:
 			http.NotFound(w, r)
 			return
@@ -308,6 +308,8 @@ func newConfigWebHandlerWithNative(store *configWebStore, host string, native *n
 			Revision    string `json:"revision"`
 			MergeNative *bool  `json:"mergeNative"`
 			Runner      string `json:"runner"`
+			Provider    string `json:"provider"`
+			Protocol    string `json:"protocol"`
 			File        string `json:"file"`
 			Hash        string `json:"hash"`
 			Region      string `json:"region"`
@@ -323,7 +325,7 @@ func newConfigWebHandlerWithNative(store *configWebStore, host string, native *n
 			http.Error(w, "invalid or oversized editor request", 400)
 			return
 		}
-		if handleConfigWebCatalog(w, r, draft.Text, draft.Runner) {
+		if handleConfigWebCatalog(w, r, draft.Text, draft.Runner, draft.Provider, draft.Protocol) {
 			return
 		}
 		options := configModelsOptions{codexMergeNative: draft.MergeNative == nil || *draft.MergeNative, nativeLoader: native}
@@ -496,7 +498,7 @@ func codexCatalogTarget(targetPath, generated string) (state, content, note stri
 
 func configWebAssetAllowed(path string) bool {
 	switch path {
-	case "/", "/app.js", "/tree.mjs", "/url-state.mjs", "/model-run.mjs", "/style.css", "/model.schema.json":
+	case "/", "/app.js", "/tree.mjs", "/url-state.mjs", "/model-run.mjs", "/editor-controls.mjs", "/confirm-modal.mjs", "/style.css", "/model.schema.json":
 		return true
 	}
 	if !strings.HasPrefix(path, "/vs/") || strings.HasSuffix(path, "/") || strings.Contains(path, "..") || strings.Contains(path, `\`) {
@@ -564,102 +566,6 @@ func codexUserConfigPath() string {
 		return ""
 	}
 	return filepath.Join(home, ".codex", "config.toml")
-}
-
-// inspectCodexUserConfig reports at most two warnings about the on-disk
-// Codex config: missing model_provider = "llm-proxy", and model_catalog_json
-// not pointing at the generated catalog file.
-func inspectCodexUserConfig() []configWebPreviewWarning {
-	path := codexUserConfigPathFn()
-	display := displayHomePath(path)
-	if display == "" {
-		display = "~/.codex/config.toml"
-	}
-	keys := map[string]string{}
-	if path != "" {
-		if data, err := os.ReadFile(path); err == nil {
-			keys = parseCodexTopLevelTOML(string(data))
-		}
-	}
-	var warnings []configWebPreviewWarning
-	if keys["model_provider"] != "llm-proxy" {
-		warnings = append(warnings, configWebPreviewWarning{
-			Code:    "model_provider",
-			Message: display + ` is missing model_provider = "llm-proxy". Codex will send proxy models to ChatGPT and they 400. Paste that line next to model =.`,
-		})
-	}
-	catalogWant := codexCatalogTargetPathFn()
-	if !catalogPathMatches(keys["model_catalog_json"], catalogWant) {
-		wantDisplay := displayHomePath(catalogWant)
-		if wantDisplay == "" {
-			wantDisplay = "~/.codex/" + configModelsCatalogFileName
-		}
-		warnings = append(warnings, configWebPreviewWarning{
-			Code:    "model_catalog_json",
-			Message: "model_catalog_json is not set to " + wantDisplay + ". The /model picker will not use the catalog file.",
-		})
-	}
-	if len(warnings) > 2 {
-		warnings = warnings[:2]
-	}
-	return warnings
-}
-
-// parseCodexTopLevelTOML reads bare key = value pairs until the first TOML
-// table. Comments and arrays are ignored; quoted strings are unquoted.
-func parseCodexTopLevelTOML(text string) map[string]string {
-	keys := map[string]string{}
-	for _, raw := range strings.Split(text, "\n") {
-		line := strings.TrimSpace(raw)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if strings.HasPrefix(line, "[") {
-			break
-		}
-		eq := strings.Index(line, "=")
-		if eq <= 0 {
-			continue
-		}
-		key := strings.TrimSpace(line[:eq])
-		if key == "" || strings.ContainsAny(key, ".[]") {
-			continue
-		}
-		value := strings.TrimSpace(line[eq+1:])
-		if unquoted, ok := unquoteTOMLValue(value); ok {
-			keys[key] = unquoted
-		}
-	}
-	return keys
-}
-
-func unquoteTOMLValue(value string) (string, bool) {
-	if value == "" {
-		return "", false
-	}
-	if strings.HasPrefix(value, "[") {
-		return "", false
-	}
-	if value[0] == '"' || value[0] == '\'' {
-		quote := value[0]
-		end := 1
-		for end < len(value) {
-			if value[end] == quote && value[end-1] != '\\' {
-				inner := value[1:end]
-				if quote == '"' {
-					inner = strings.ReplaceAll(inner, `\"`, `"`)
-					inner = strings.ReplaceAll(inner, `\\`, `\`)
-				}
-				return inner, true
-			}
-			end++
-		}
-		return "", false
-	}
-	if i := strings.Index(value, "#"); i >= 0 {
-		value = strings.TrimSpace(value[:i])
-	}
-	return value, value != ""
 }
 
 func catalogPathMatches(got, want string) bool {

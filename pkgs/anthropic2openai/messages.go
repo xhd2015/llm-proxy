@@ -186,7 +186,7 @@ func toolResultContentFromResponsesItem(item map[string]any) toolResultContent {
 			switch partType {
 			case "input_text", "output_text":
 				if text, ok := part["text"].(string); ok {
-					if text == toolResultErrorMarker {
+					if isToolResultErrorMarker(text) {
 						isError = true
 					} else {
 						content = append(content, map[string]any{"type": "text", "text": text})
@@ -267,7 +267,7 @@ func alternateImageToolResultContent(value any) (toolResultContent, bool) {
 func appendSanitizedToolResultValue(value any, content *[]any, isError *bool) {
 	switch typed := value.(type) {
 	case string:
-		if typed == toolResultErrorMarker {
+		if isToolResultErrorMarker(typed) {
 			*isError = true
 		} else if typed != "" {
 			*content = append(*content, map[string]any{"type": "text", "text": typed})
@@ -282,7 +282,7 @@ func appendSanitizedToolResultValue(value any, content *[]any, isError *bool) {
 			switch partType {
 			case "input_text", "output_text", "text":
 				if text, ok := part["text"].(string); ok {
-					if text == toolResultErrorMarker {
+					if isToolResultErrorMarker(text) {
 						*isError = true
 					} else {
 						*content = append(*content, map[string]any{"type": "text", "text": text})
@@ -296,7 +296,7 @@ func appendSanitizedToolResultValue(value any, content *[]any, isError *bool) {
 		partType, _ := typed["type"].(string)
 		if partType == "input_text" || partType == "output_text" || partType == "text" {
 			if text, ok := typed["text"].(string); ok {
-				if text == toolResultErrorMarker {
+				if isToolResultErrorMarker(text) {
 					*isError = true
 				} else {
 					*content = append(*content, map[string]any{"type": "text", "text": text})

@@ -18,10 +18,10 @@ const (
 	wholeDataURLMinBytes       = 8 * 1024
 	base64ishMinBytes          = 16 * 1024
 	maxMediaTraversalDepth     = 32
-	toolResultMediaMovedMarker = "[cc-switch: tool result media moved to the following user message]"
+	toolResultMediaMovedMarker = "[tool result media moved to the following user message]"
 	// toolResultMediaAttachedMarker replaces media blocks that stay attached
 	// to the tool result instead of moving to a separate user message.
-	toolResultMediaAttachedMarker = "[cc-switch: tool result media attached as native media]"
+	toolResultMediaAttachedMarker = "[tool result media attached as native media]"
 )
 
 type toolMediaScope int
@@ -143,7 +143,7 @@ func clampBase64ishStrings(value *any) {
 		shouldOmit := (len(trimmed) >= wholeDataURLMinBytes && hasCaseInsensitivePrefix(trimmed, "data:")) ||
 			looksLikeBase64Payload(trimmed)
 		if shouldOmit {
-			*value = "[cc-switch: omitted " + strconv.Itoa(len(typed)) + " bytes]"
+			*value = "[omitted " + strconv.Itoa(len(typed)) + " bytes]"
 		}
 	case []any:
 		for i := range typed {

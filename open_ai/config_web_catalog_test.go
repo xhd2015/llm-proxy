@@ -39,7 +39,7 @@ func catalogTestConfigText(t *testing.T, doc proxyConfig) string {
 func catalogTestConfig() proxyConfig {
 	return proxyConfig{
 		Providers: []configProvider{
-			{Name: "ais", Kind: "http-proxy", BaseURL: "https://example.invalid/v1"},
+			{Name: "gateway-b", Kind: "http-proxy", BaseURL: "https://example.invalid/v1"},
 			{Name: "codex", Kind: "codex"},
 		},
 		Models: []configModel{
@@ -61,9 +61,9 @@ func catalogTestConfig() proxyConfig {
 			},
 			{
 				Protocol:          "openai-responses",
-				Provider:          "ais",
+				Provider:          "gateway-b",
 				ProviderModelName: "gpt-6-sol",
-				DisplayName:       "GPT-6 Sol via AIS",
+				DisplayName:       "GPT-6 Sol via Gateway B",
 			},
 		},
 	}
@@ -84,14 +84,14 @@ func TestCompareCatalogSourceKeepsCuratedRoutesAndAppendsNewOnes(t *testing.T) {
 		t.Fatalf("updates = %+v; want none (872000 is a declared window)", result.Update)
 	}
 	// gpt-5.6-sol is absent from the catalog, gpt-6-sol is owned by provider
-	// ais, so only the kept route stays and no route is added.
+	// gateway-b, so only the kept route stays and no route is added.
 	if len(result.Add) != 0 {
-		t.Fatalf("adds = %+v; want none (gpt-6-sol is already served by ais)", result.Add)
+		t.Fatalf("adds = %+v; want none (gpt-6-sol is already served by gateway-b)", result.Add)
 	}
 	if result.Kept != 1 || result.Conflicts != 1 || result.Same != 1 {
 		t.Fatalf("kept = %d, conflicts = %d, same = %d; want 1, 1, 1", result.Kept, result.Conflicts, result.Same)
 	}
-	if !strings.Contains(result.Note, `"gpt-6-sol" is already served by provider "ais"`) {
+	if !strings.Contains(result.Note, `"gpt-6-sol" is already served by provider "gateway-b"`) {
 		t.Fatalf("note = %q; want the conflict explained", result.Note)
 	}
 	if got := result.Generated[0].DisplayName; got != "GPT-6-Astra" {
@@ -141,7 +141,7 @@ func TestCompareCatalogSourceMissingContextWindowIsFilled(t *testing.T) {
 
 func TestCompareCatalogSourceAddsMissingRoutes(t *testing.T) {
 	doc := catalogTestConfig()
-	doc.Models = doc.Models[:2] // drop the conflicting ais route
+	doc.Models = doc.Models[:2] // drop the conflicting gateway-b route
 	result, err := compareCatalogSource(doc, catalogTestSource())
 	if err != nil {
 		t.Fatalf("compareCatalogSource: %v", err)
@@ -249,7 +249,7 @@ func TestCatalogFragmentText(t *testing.T) {
 func TestCatalogModelObjectsKeepFileOrderAndEveryField(t *testing.T) {
 	text := `{"models": [
 		{"protocol": "openai-responses", "provider": "codex", "providerModelName": "gpt-6-astra", "maxTokens": 32000, "reasoning": {"defaultEffort": "high"}, "contextWindow": 1000},
-		{"protocol": "openai-responses", "provider": "ais", "providerModelName": "gpt-6-sol"},
+		{"protocol": "openai-responses", "provider": "gateway-b", "providerModelName": "gpt-6-sol"},
 		{"protocol": "openai-responses", "provider": "codex", "providerModelName": "gpt-5.6-sol", "variants": [{"clientModelName": "gpt-5.6-sol-fast"}]}
 	]}`
 	objects, err := catalogModelObjects(text, "codex")

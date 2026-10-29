@@ -1,10 +1,25 @@
 package anthropic2openai
 
+import "strings"
+
 // Sanitization constants and helpers shared with the request/response
 // transforms. Ported from the relevant subset of cc-switch
 // providers/transform_responses.rs.
 
-const toolResultErrorMarker = "[cc-switch:tool-result-error]"
+const toolResultErrorMarker = "[tool-result-error]"
+
+// Older clients can namespace this sentinel. The namespace is opaque: it is
+// never used to identify a product or select conversion behavior.
+func isToolResultErrorMarker(text string) bool {
+	if text == toolResultErrorMarker {
+		return true
+	}
+	if !strings.HasPrefix(text, "[") || !strings.HasSuffix(text, ":tool-result-error]") {
+		return false
+	}
+	namespace := strings.TrimSuffix(strings.TrimPrefix(text, "["), ":tool-result-error]")
+	return namespace != "" && !strings.ContainsAny(namespace, "[]: \t\r\n")
+}
 
 // responsesMinMaxOutputTokens is the OpenAI Responses API floor for
 // max_output_tokens; smaller budgets are lifted to this minimum instead of

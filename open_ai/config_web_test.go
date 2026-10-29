@@ -174,7 +174,7 @@ func TestConfigWebRequestProtection(t *testing.T) {
 			}
 		})
 	}
-	for _, path := range []string{"/", "/app.js", "/tree.mjs", "/url-state.mjs", "/style.css", "/model.schema.json", "/vs/editor/editor.main.js", "/vs/editor/editor.main.css", "/vs/editor/editor.worker.js", "/vs/language/json/json.worker.js"} {
+	for _, path := range []string{"/", "/app.js", "/tree.mjs", "/url-state.mjs", "/editor-controls.mjs", "/confirm-modal.mjs", "/style.css", "/model.schema.json", "/vs/editor/editor.main.js", "/vs/editor/editor.main.css", "/vs/editor/editor.worker.js", "/vs/language/json/json.worker.js"} {
 		w := webTestRequest(handler, "GET", path, "")
 		csp := w.Header().Get("Content-Security-Policy")
 		if w.Code != 200 || w.Body.Len() == 0 || w.Header().Get("Cache-Control") != "no-store" {

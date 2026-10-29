@@ -14,17 +14,23 @@ export function parseEditorURL(search) {
   const model = params.get('model') || '';
   const edit = params.get('edit') === 'json' ? 'json' : '';
   const diff = params.get('diff') === '1' ? '1' : '';
-  return {tab, runner, file, model, edit, diff};
+  // A probed provider is compared by endpoint, so the compare tab can carry one
+  // instead of a catalog runner.
+  const provider = tab === 'compare' ? params.get('provider') || '' : '';
+  return {tab, runner, file, model, edit, diff, provider};
 }
 
-export function editorSearch({tab = 'models', runner = 'dsh', file = '', model = '', edit = '', diff = ''} = {}) {
+export function editorSearch({tab = 'models', runner = 'dsh', provider = '', file = '', model = '', edit = '', diff = ''} = {}) {
   const params = new URLSearchParams();
   if (tab && tab !== 'models') params.set('tab', tab);
   if (tab === 'models') {
     if (model) params.set('model', model);
     if (edit === 'json') params.set('edit', 'json');
   }
-  if (tab === 'compare') params.set('runner', compareRunners.includes(runner) ? runner : compareRunners[0]);
+  if (tab === 'compare') {
+    if (provider) params.set('provider', provider);
+    else params.set('runner', compareRunners.includes(runner) ? runner : compareRunners[0]);
+  }
   if (tab === 'preview') {
     if (runner && runner !== 'dsh') params.set('runner', runner);
     if (file) params.set('file', file);

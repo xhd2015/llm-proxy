@@ -5,13 +5,13 @@ import {parseEditorURL, editorSearch, previewFileIndex} from '../config_web/url-
 test('round-trips preview + runner + file', () => {
   const search = editorSearch({tab: 'preview', runner: 'codex', file: 'llm-proxy-codex.json'});
   assert.equal(search, '?tab=preview&runner=codex&file=llm-proxy-codex.json');
-  assert.deepEqual(parseEditorURL(search), {tab: 'preview', runner: 'codex', file: 'llm-proxy-codex.json', model: '', edit: '', diff: ''});
-  assert.deepEqual(parseEditorURL(search.slice(1)), {tab: 'preview', runner: 'codex', file: 'llm-proxy-codex.json', model: '', edit: '', diff: ''});
+  assert.deepEqual(parseEditorURL(search), {tab: 'preview', runner: 'codex', file: 'llm-proxy-codex.json', model: '', edit: '', diff: '', provider: ''});
+  assert.deepEqual(parseEditorURL(search.slice(1)), {tab: 'preview', runner: 'codex', file: 'llm-proxy-codex.json', model: '', edit: '', diff: '', provider: ''});
 });
 
 test('invalid tab and runner fall back to defaults', () => {
-  assert.deepEqual(parseEditorURL('?tab=nope&runner=claude&file=x'), {tab: 'models', runner: 'dsh', file: 'x', model: '', edit: '', diff: ''});
-  assert.deepEqual(parseEditorURL(''), {tab: 'models', runner: 'dsh', file: '', model: '', edit: '', diff: ''});
+  assert.deepEqual(parseEditorURL('?tab=nope&runner=claude&file=x'), {tab: 'models', runner: 'dsh', file: 'x', model: '', edit: '', diff: '', provider: ''});
+  assert.deepEqual(parseEditorURL(''), {tab: 'models', runner: 'dsh', file: '', model: '', edit: '', diff: '', provider: ''});
 });
 
 test('omits runner and file unless tab is preview', () => {
@@ -31,9 +31,9 @@ test('preview file is selected by name, not index', () => {
 test('models tab carries model and edit=json', () => {
   const search = editorSearch({tab: 'models', model: 'grok-4.6', edit: 'json'});
   assert.equal(search, '?model=grok-4.6&edit=json');
-  assert.deepEqual(parseEditorURL(search), {tab: 'models', runner: 'dsh', file: '', model: 'grok-4.6', edit: 'json', diff: ''});
+  assert.deepEqual(parseEditorURL(search), {tab: 'models', runner: 'dsh', file: '', model: 'grok-4.6', edit: 'json', diff: '', provider: ''});
   assert.equal(editorSearch({tab: 'models', model: 'grok-4.6'}), '?model=grok-4.6');
-  assert.deepEqual(parseEditorURL('?model=grok-4.6'), {tab: 'models', runner: 'dsh', file: '', model: 'grok-4.6', edit: '', diff: ''});
+  assert.deepEqual(parseEditorURL('?model=grok-4.6'), {tab: 'models', runner: 'dsh', file: '', model: 'grok-4.6', edit: '', diff: '', provider: ''});
 });
 
 test('edit only accepts json, other tabs drop model and edit', () => {
@@ -41,8 +41,8 @@ test('edit only accepts json, other tabs drop model and edit', () => {
   assert.equal(editorSearch({tab: 'preview', model: 'grok-4.6', edit: 'json'}), '?tab=preview');
   assert.equal(editorSearch({tab: 'raw', model: 'grok-4.6', edit: 'json'}), '?tab=raw');
   assert.equal(editorSearch({tab: 'providers', model: 'grok-4.6'}), '?tab=providers');
-  assert.deepEqual(parseEditorURL('?tab=preview&model=grok-4.6&edit=json&runner=grok'), {tab: 'preview', runner: 'grok', file: '', model: 'grok-4.6', edit: 'json', diff: ''});
-  assert.deepEqual(parseEditorURL('?edit=form'), {tab: 'models', runner: 'dsh', file: '', model: '', edit: '', diff: ''});
+  assert.deepEqual(parseEditorURL('?tab=preview&model=grok-4.6&edit=json&runner=grok'), {tab: 'preview', runner: 'grok', file: '', model: 'grok-4.6', edit: 'json', diff: '', provider: ''});
+  assert.deepEqual(parseEditorURL('?edit=form'), {tab: 'models', runner: 'dsh', file: '', model: '', edit: '', diff: '', provider: ''});
 });
 
 // The sync picker is deep-linkable: ?diff=1 opens the panel for the selected
@@ -50,12 +50,12 @@ test('edit only accepts json, other tabs drop model and edit', () => {
 test('preview tab carries diff=1 only', () => {
   const search = editorSearch({tab: 'preview', file: 'llm-proxy-dsh.yaml', diff: '1'});
   assert.equal(search, '?tab=preview&file=llm-proxy-dsh.yaml&diff=1');
-  assert.deepEqual(parseEditorURL(search), {tab: 'preview', runner: 'dsh', file: 'llm-proxy-dsh.yaml', model: '', edit: '', diff: '1'});
+  assert.deepEqual(parseEditorURL(search), {tab: 'preview', runner: 'dsh', file: 'llm-proxy-dsh.yaml', model: '', edit: '', diff: '1', provider: ''});
   assert.equal(editorSearch({tab: 'preview', file: 'llm-proxy-dsh.yaml'}), '?tab=preview&file=llm-proxy-dsh.yaml');
   assert.equal(editorSearch({tab: 'preview', file: 'llm-proxy-dsh.yaml', diff: '0'}), '?tab=preview&file=llm-proxy-dsh.yaml');
   assert.equal(editorSearch({tab: 'models', diff: '1'}), '');
   assert.equal(editorSearch({tab: 'preview', runner: 'grok', file: 'llm-proxy-grok.toml', diff: '1'}), '?tab=preview&runner=grok&file=llm-proxy-grok.toml&diff=1');
-  assert.deepEqual(parseEditorURL('?diff=1'), {tab: 'models', runner: 'dsh', file: '', model: '', edit: '', diff: '1'});
+  assert.deepEqual(parseEditorURL('?diff=1'), {tab: 'models', runner: 'dsh', file: '', model: '', edit: '', diff: '1', provider: ''});
 });
 
 // The compare tab is deep-linkable too, but its runner is one of the catalog
@@ -63,11 +63,23 @@ test('preview tab carries diff=1 only', () => {
 test('compare tab carries the catalog runner', () => {
   const search = editorSearch({tab: 'compare', runner: 'grok'});
   assert.equal(search, '?tab=compare&runner=grok');
-  assert.deepEqual(parseEditorURL(search), {tab: 'compare', runner: 'grok', file: '', model: '', edit: '', diff: ''});
+  assert.deepEqual(parseEditorURL(search), {tab: 'compare', runner: 'grok', file: '', model: '', edit: '', diff: '', provider: ''});
   assert.equal(editorSearch({tab: 'compare', runner: 'commandcode'}), '?tab=compare&runner=commandcode');
-  assert.deepEqual(parseEditorURL('?tab=compare'), {tab: 'compare', runner: 'codex', file: '', model: '', edit: '', diff: ''});
-  assert.deepEqual(parseEditorURL('?tab=compare&runner=dsh'), {tab: 'compare', runner: 'codex', file: '', model: '', edit: '', diff: ''});
-  assert.deepEqual(parseEditorURL('?tab=preview&runner=commandcode'), {tab: 'preview', runner: 'dsh', file: '', model: '', edit: '', diff: ''});
+  assert.deepEqual(parseEditorURL('?tab=compare'), {tab: 'compare', runner: 'codex', file: '', model: '', edit: '', diff: '', provider: ''});
+  assert.deepEqual(parseEditorURL('?tab=compare&runner=dsh'), {tab: 'compare', runner: 'codex', file: '', model: '', edit: '', diff: '', provider: ''});
+  assert.deepEqual(parseEditorURL('?tab=preview&runner=commandcode'), {tab: 'preview', runner: 'dsh', file: '', model: '', edit: '', diff: '', provider: ''});
   assert.equal(editorSearch({tab: 'compare', runner: 'dsh'}), '?tab=compare&runner=codex');
   assert.equal(editorSearch({tab: 'compare', runner: 'grok', file: 'x.json', diff: '1'}), '?tab=compare&runner=grok');
+});
+
+// A probed http-proxy provider is deep-linkable too: it replaces the runner, so
+// the two never reach the same URL.
+test('compare tab carries a probed provider instead of a runner', () => {
+  const search = editorSearch({tab: 'compare', provider: 'gateway', runner: 'grok'});
+  assert.equal(search, '?tab=compare&provider=gateway');
+  assert.deepEqual(parseEditorURL(search), {tab: 'compare', runner: 'codex', file: '', model: '', edit: '', diff: '', provider: 'gateway'});
+  assert.equal(editorSearch({tab: 'compare', provider: 'gateway', file: 'x.json'}), '?tab=compare&provider=gateway');
+  assert.equal(editorSearch({tab: 'models', provider: 'gateway'}), '');
+  assert.equal(editorSearch({tab: 'preview', provider: 'gateway'}), '?tab=preview');
+  assert.deepEqual(parseEditorURL('?provider=gateway'), {tab: 'models', runner: 'dsh', file: '', model: '', edit: '', diff: '', provider: ''});
 });

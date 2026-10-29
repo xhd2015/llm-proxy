@@ -967,7 +967,7 @@ func TestJSONStringNestedToolImageIsNotTextForAnthropic(t *testing.T) {
 		}
 	}
 	serialized := canonicalJSONString(result)
-	if !contains(serialized, "[cc-switch: omitted 20000 bytes]") {
+	if !contains(serialized, "[omitted 20000 bytes]") {
 		t.Fatalf("serialized = %s", serialized)
 	}
 	if contains(serialized, strings.Repeat("A", 64)) {

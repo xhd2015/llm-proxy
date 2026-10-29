@@ -34,15 +34,16 @@ func catalogProtocol(kind string) string {
 
 // catalogRoute is one route of a generated config fragment. The field order
 // matches config.json so both diff panes line up line by line, and it holds
-// only the fields this feature generates or syncs: reasoning, maxTokens,
-// inputs and variants stay curated by hand.
+// the fields this feature generates or syncs. HTTP reasoning metadata is a
+// proposed diff; inputs, token limits and variants remain curated by hand.
 type catalogRoute struct {
-	Protocol          string `json:"protocol"`
-	Provider          string `json:"provider"`
-	ProviderModelName string `json:"providerModelName"`
-	ClientModelName   string `json:"clientModelName,omitempty"`
-	DisplayName       string `json:"displayName"`
-	ContextWindow     *int   `json:"contextWindow,omitempty"`
+	Protocol          string           `json:"protocol"`
+	Provider          string           `json:"provider"`
+	ProviderModelName string           `json:"providerModelName"`
+	ClientModelName   string           `json:"clientModelName,omitempty"`
+	DisplayName       string           `json:"displayName"`
+	ContextWindow     *int             `json:"contextWindow,omitempty"`
+	Reasoning         *configReasoning `json:"reasoning,omitempty"`
 }
 
 // catalogModel is one model entry of a runner catalog, normalized across
@@ -50,6 +51,10 @@ type catalogRoute struct {
 type catalogModel struct {
 	ID   string
 	Name string
+	// Protocol overrides the provider kind's protocol. Probed catalogs serve
+	// more than one protocol per provider, so the model carries its own.
+	Protocol  string
+	Reasoning *configReasoning
 	// ContextWindow is the primary window, 0 when the source has none.
 	ContextWindow int
 	// DeclaredWindows are every window the source advertises for the model;
@@ -69,10 +74,11 @@ type catalogSource struct {
 	Models    []catalogModel
 }
 
-// catalogContextUpdate is one field apply rewrites on an existing route.
+// catalogContextUpdate holds proposed metadata changes for an existing route.
 type catalogContextUpdate struct {
-	Key           string `json:"key"`
-	ContextWindow *int   `json:"contextWindow"`
+	Key           string           `json:"key"`
+	ContextWindow *int             `json:"contextWindow"`
+	Reasoning     *configReasoning `json:"reasoning,omitempty"`
 }
 
 // catalogComparison is the server-side result of comparing one runner catalog
@@ -306,11 +312,16 @@ func catalogRoutes(source catalogSource) []catalogRoute {
 		if model.Hidden || model.ID == "" {
 			continue
 		}
+		routeProtocol := protocol
+		if model.Protocol != "" {
+			routeProtocol = model.Protocol
+		}
 		route := catalogRoute{
-			Protocol:          protocol,
+			Protocol:          routeProtocol,
 			Provider:          source.Provider.Name,
 			ProviderModelName: model.ID,
 			DisplayName:       model.Name,
+			Reasoning:         model.Reasoning,
 		}
 		if model.ContextWindow > 0 {
 			window := model.ContextWindow
@@ -336,6 +347,7 @@ func draftCatalogRoutes(doc proxyConfig, provider string) []catalogRoute {
 			ClientModelName:   model.ClientModelName,
 			DisplayName:       model.DisplayName,
 			ContextWindow:     model.ContextWindow,
+			Reasoning:         model.Reasoning,
 		})
 	}
 	return routes
@@ -419,9 +431,10 @@ func compareCatalogSource(doc proxyConfig, source catalogSource) (catalogCompari
 
 	draft := draftCatalogRoutes(doc, source.Provider.Name)
 	result.Draft = draft
+	routeKey := catalogRouteKey
 	draftByKey := make(map[string]bool, len(draft))
 	for _, route := range draft {
-		draftByKey[catalogRouteKey(route)] = true
+		draftByKey[routeKey(route)] = true
 	}
 
 	// Every route name must stay unique across the whole config, variants
@@ -444,14 +457,14 @@ func compareCatalogSource(doc proxyConfig, source catalogSource) (catalogCompari
 	generated := make(map[string]catalogRoute, len(source.Models))
 	order := make([]string, 0, len(source.Models))
 	for _, route := range catalogRoutes(source) {
-		key := catalogRouteKey(route)
+		key := routeKey(route)
 		generated[key] = route
 		declared[key] = source.windowsFor(route.ProviderModelName)
 		order = append(order, key)
 	}
 
 	for _, route := range draft {
-		key := catalogRouteKey(route)
+		key := routeKey(route)
 		generatedRoute, ok := generated[key]
 		if !ok {
 			result.Kept++
@@ -462,9 +475,16 @@ func compareCatalogSource(doc proxyConfig, source catalogSource) (catalogCompari
 			return catalogComparison{}, fmt.Errorf("route %q uses %s here but provider %q requires %s", key, route.Protocol, source.Provider.Name, generatedRoute.Protocol)
 		}
 		merged := route
+		update := catalogContextUpdate{Key: catalogRouteKey(route)}
+		changed := false
 		if !catalogContextWindowAccepted(route.ContextWindow, generatedRoute.ContextWindow, declared[key]) {
 			merged.ContextWindow = generatedRoute.ContextWindow
-			result.Update = append(result.Update, catalogContextUpdate{Key: key, ContextWindow: generatedRoute.ContextWindow})
+			update.ContextWindow = generatedRoute.ContextWindow
+			changed = true
+		}
+
+		if changed {
+			result.Update = append(result.Update, update)
 		} else {
 			result.Same++
 		}
@@ -476,9 +496,10 @@ func compareCatalogSource(doc proxyConfig, source catalogSource) (catalogCompari
 			continue
 		}
 		route := generated[key]
-		if owner, ok := taken[key]; ok {
+		served := catalogRouteKey(route)
+		if owner, ok := taken[served]; ok {
 			result.Conflicts++
-			result.Note = appendCatalogNote(result.Note, fmt.Sprintf("%q is already served by provider %q, so it is not generated.", key, owner))
+			result.Note = appendCatalogNote(result.Note, fmt.Sprintf("%q is already served by provider %q, so it is not generated.", served, owner))
 			continue
 		}
 		result.Add = append(result.Add, route)
@@ -672,19 +693,22 @@ func catalogModelObjects(text, provider string) ([]catalogModelObject, error) {
 	return objects, nil
 }
 
-// catalogGeneratedObjects applies the catalog's context windows to the draft's
-// entries and appends the routes the catalog adds.
+// catalogGeneratedObjects applies proposed metadata to the draft entries and
+// appends the routes the catalog adds.
 func catalogGeneratedObjects(draft []catalogModelObject, updates []catalogContextUpdate, adds []map[string]any) []catalogModelObject {
-	windows := make(map[string]any, len(updates))
+	byKey := make(map[string]catalogContextUpdate, len(updates))
 	for _, update := range updates {
-		if update.ContextWindow != nil {
-			windows[update.Key] = *update.ContextWindow
-		}
+		byKey[update.Key] = update
 	}
 	objects := make([]catalogModelObject, 0, len(draft)+len(adds))
 	for _, object := range draft {
-		if window, ok := windows[object.key()]; ok {
-			object = object.with("contextWindow", window)
+		if update, ok := byKey[object.key()]; ok {
+			if update.ContextWindow != nil {
+				object = object.with("contextWindow", *update.ContextWindow)
+			}
+			if update.Reasoning != nil {
+				object = object.with("reasoning", *update.Reasoning)
+			}
 		}
 		objects = append(objects, object)
 	}
@@ -728,9 +752,13 @@ type catalogStats struct {
 }
 
 type catalogCompareResponse struct {
-	Runner       string       `json:"runner"`
+	Runner string `json:"runner"`
+	// Title is the name the compare page shows; probed providers are named by
+	// endpoint and runner catalogs fall back to their runner name.
+	Title        string       `json:"title,omitempty"`
 	Provider     string       `json:"provider"`
 	ProviderKind string       `json:"providerKind"`
+	Protocol     string       `json:"protocol,omitempty"`
 	Source       string       `json:"source"`
 	Version      string       `json:"version"`
 	FetchedAt    string       `json:"fetchedAt"`
@@ -786,18 +814,24 @@ func catalogAddObject(doc proxyConfig, route catalogRoute) map[string]any {
 }
 
 // catalogRouteTemplate finds a route of the same provider and protocol whose
-// reasoning block a new route can reuse.
+// reasoning block a new route can reuse. Routes served under a client alias are
+// used only when the provider has no plain route: an http-proxy provider serves
+// every route through an alias, and its shape is still the right template.
 func catalogRouteTemplate(doc proxyConfig, provider, protocol string) (configModel, bool) {
+	var alias configModel
+	hasAlias := false
 	for _, model := range doc.Models {
 		if model.Provider != provider || model.Protocol != protocol || model.Reasoning == nil {
 			continue
 		}
-		if model.ClientModelName != "" {
-			continue
+		if model.ClientModelName == "" {
+			return model, true
 		}
-		return model, true
+		if !hasAlias {
+			alias, hasAlias = model, true
+		}
 	}
-	return configModel{}, false
+	return alias, hasAlias
 }
 
 // newCatalogCompareResponse renders both panes from the config text itself, so
@@ -855,6 +889,14 @@ type catalogSummary struct {
 	Conflicts int    `json:"conflicts"`
 	Error     string `json:"error,omitempty"`
 	Note      string `json:"note,omitempty"`
+	// Kind is "http-proxy" for a probed provider, empty for a runner catalog.
+	Kind         string `json:"kind,omitempty"`
+	ProviderKind string `json:"providerKind,omitempty"`
+	Label        string `json:"label,omitempty"`
+	Auth         string `json:"auth,omitempty"`
+	Protocol     string `json:"protocol,omitempty"`
+	IDs          int    `json:"ids,omitempty"`
+	IDsAdded     int    `json:"idsAdded,omitempty"`
 	// Refresh is the command that refetches this runner's catalog, empty when
 	// the runner has none.
 	Refresh string `json:"refresh,omitempty"`
@@ -976,16 +1018,48 @@ func catalogRefreshExcerpt(output string) string {
 
 // handleConfigWebCatalog serves the Models tab catalog endpoints. It reports
 // whether it handled the request so the caller keeps its own routing.
-func handleConfigWebCatalog(w http.ResponseWriter, r *http.Request, text, runner string) bool {
+//
+// runner selects one of the agent catalogs; provider selects an http-proxy
+// provider to probe. The two never apply to the same request.
+func handleConfigWebCatalog(w http.ResponseWriter, r *http.Request, text, runner, provider, protocol string) bool {
 	switch r.URL.Path {
 	case "/api/catalog-summary":
 		doc, _, diagnostics := inspectProxyConfigBytes([]byte(text))
 		configError := diagnosticErrors(diagnostics)
-		rows := make([]catalogSummary, 0, len(catalogRunnerKinds))
+		rows := make([]catalogSummary, 0, len(catalogRunnerKinds)+len(doc.Providers))
 		for _, kind := range catalogRunnerKinds {
 			rows = append(rows, catalogSummaryRow(doc, kind, configError))
 		}
+		rows = append(rows, httpProxySummaryRows(doc)...)
 		writeConfigWebJSON(w, 200, map[string]any{"runners": rows})
+		return true
+	case "/api/catalog-probe":
+		var doc proxyConfig
+		if err := json.Unmarshal([]byte(text), &doc); err != nil {
+			http.Error(w, "cannot parse configuration JSON: "+err.Error(), http.StatusUnprocessableEntity)
+			return true
+		}
+		probe, result, err := compareHTTPProxyCatalog(r.Context(), doc, provider, protocol, true)
+		if err != nil {
+			if errors.Is(err, errHTTPProxyProviderUnknown) || errors.Is(err, errHTTPProxyNotProxy) || errors.Is(err, errHTTPProxyProtocol) || errors.Is(err, errHTTPProxyProviderConfig) {
+				http.Error(w, err.Error(), httpProxyErrorStatus(err))
+				return true
+			}
+			if errors.Is(err, errHTTPProxyProbeRunning) {
+				http.Error(w, err.Error(), http.StatusConflict)
+				return true
+			}
+			// The probe itself failed, so there is no row to update.
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return true
+		}
+		config, err := proxyCatalogProvider(doc, provider)
+		if err != nil {
+			http.Error(w, err.Error(), httpProxyErrorStatus(err))
+			return true
+		}
+		row := httpProxySummaryRow(doc, config, probe, result)
+		writeConfigWebJSON(w, 200, map[string]any{"row": row, "probe": probe})
 		return true
 	case "/api/catalog-refresh":
 		args, ok := catalogRefreshCommand(runner)
@@ -1023,6 +1097,26 @@ func handleConfigWebCatalog(w http.ResponseWriter, r *http.Request, text, runner
 		writeConfigWebJSON(w, http.StatusBadGateway, map[string]any{"row": row, "output": output, "error": message})
 		return true
 	case "/api/catalog-compare":
+		if provider != "" {
+			var doc proxyConfig
+			if err := json.Unmarshal([]byte(text), &doc); err != nil {
+				http.Error(w, "cannot parse configuration JSON: "+err.Error(), http.StatusUnprocessableEntity)
+				return true
+			}
+			probe, result, err := compareHTTPProxyCatalog(r.Context(), doc, provider, protocol, false)
+			if err != nil {
+				status := httpProxyErrorStatus(err)
+				http.Error(w, err.Error(), status)
+				return true
+			}
+			response, err := newHTTPProxyCompareResponse(probe, result, text)
+			if err != nil {
+				http.Error(w, "cannot read the models[] entries: "+err.Error(), http.StatusUnprocessableEntity)
+				return true
+			}
+			writeConfigWebJSON(w, 200, response)
+			return true
+		}
 		if err := catalogCheck(runner); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return true

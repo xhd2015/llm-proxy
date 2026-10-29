@@ -58,21 +58,21 @@ const syncTestSettings = `- id: ui-onboarding
     default: std-no-subagent
 `
 
-// syncTestPreview is the generated DSH export: the AIS provider split into a
+// syncTestPreview is the generated DSH export: the Gateway B provider split into a
 // protocol-suffixed provider, a model added to Codex, and llm-proxy-old gone.
 const syncTestPreview = `# Store a non-empty placeholder for each apiKeyEnv in DSH credentials or the environment.
 - id: llm-pi-ai
   name: '@deepseek-ai/dsh-llm-pi-ai'
   config:
     providers:
-      llm-proxy-ais-anthropic-messages:
-        displayName: AIS (llm-proxy)
-        apiKeyEnv: AIS_API_KEY
+      llm-proxy-gateway-b-anthropic-messages:
+        displayName: Gateway B (llm-proxy)
+        apiKeyEnv: GATEWAY_B_API_KEY
         api: anthropic-messages
         baseURL: http://127.0.0.1:8890
         models:
-          - id: ais-glm-5-2
-            name: AIS - GLM-5.2
+          - id: gateway-b-glm-5-2
+            name: Gateway B - GLM-5.2
       llm-proxy-codex:
         displayName: Codex (llm-proxy)
         apiKeyEnv: CODEX_API_KEY

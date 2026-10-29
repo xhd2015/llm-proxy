@@ -33,7 +33,7 @@ func Assert(t *testing.T, d *session.Doctest, req *Request, resp *Response, err 
 	if !strings.Contains(resp.Diff.Region, `base_url = "http://localhost:8892/v1"`) {
 		t.Fatalf("run must include the last model table's body:\n%s", resp.Diff.Region)
 	}
-	for _, id := range []string{"grok-4.5", "ais-glm-5-2", "cc-deepseek-v4-flash"} {
+	for _, id := range []string{"grok-4.5", "gateway-b-glm-5-2", "cc-deepseek-v4-flash"} {
 		if !strings.Contains(resp.Diff.Region, id) {
 			t.Fatalf("run is missing model %s:\n%s", id, resp.Diff.Region)
 		}

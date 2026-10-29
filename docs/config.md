@@ -91,24 +91,23 @@ subscription transformations. It may declare exactly one of `token`,
 `Authorization: Bearer`. `token` is an inline secret. `tokenFile` is a path to
 a plaintext file that is trimmed and re-read on every request so a rotated
 file is picked up without restarting. `dummyToken` is a compatibility alias of
-`token` (AIS uses the placeholder `PROXY_MANAGED`). A provider may instead
+`token`; use a non-secret placeholder such as `PROXY_MANAGED` only when the configured upstream accepts it. A provider may instead
 declare `credentials`, an array of those same account fields (`home`,
 `authFile`, `baseUrl`, `token`, `tokenFile`, `dummyToken`) plus optional
 `name` and `selected`. The first entry with `selected: true` is used; if none
 are selected, the first entry is used. Do not set both `credentials` and the
 legacy flat auth fields. Extra `selected: true` values after the first produce
 a warning. `name`, `kind`, `subscription`, and `version` stay on the provider.
-Restart the proxy after changing which credential is selected. Keep a
-single `baseUrl` that includes the upstream `/v1` root (for example AIS Switch
-at `http://127.0.0.1:15721/v1`): Anthropic clients hit `/v1/messages` and Codex
-hits `/v1/responses` on that same origin. Variants cannot change `protocol` or
-`providerModelName`, so a gateway that speaks both protocols needs two base
-models on that one provider — `anthropic-messages` with the names DSH already
-uses (AIS Claude aliases such as `claude-fable-5`), and `openai-responses` with
-the gateway's native Responses ids (AIS: `llm-gateway--glm-5.3`). The Responses
-bases export to Codex like any other `openai-responses` route; do not set
-`protocolAdapter` on them. Unadapted Anthropic bases stay DSH-only and appear
-in the Codex preview hint.
+Restart the proxy after changing which credential is selected. Use the full upstream API `baseUrl`, including its `/v1` path. The proxy strips
+its own incoming `/v1` prefix and joins the remaining request path onto that base.
+For example, `https://gateway.example/one/v1` receives `/one/v1/responses`, while
+`https://gateway.example/two/v1` receives `/two/v1/messages`. Configure these as
+separate `http-proxy` providers when their API bases or protocols differ. No
+provider name, hostname, port, or path spelling selects special handling.
+
+Variants cannot change `protocol` or `providerModelName`. An OpenAI Responses
+route exports to Codex directly; an Anthropic route requires `anthropic2openai`
+when a Responses client needs it. Do not add an adapter to a native Responses route.
 
 A model or variant may declare `protocolAdapter` to expose a second,
 translated client surface in addition to the one `protocol` specifies. The
@@ -163,7 +162,7 @@ output. If no variant matches, the base model is printed.
 
 `codex-models` emits a `~/.codex/config.toml` snippet with the provider block and the default `model`, followed after a `# ----- Model catalog -----` delimiter by a Codex model catalog JSON. Saving that JSON as `~/.codex/llm-proxy-codex.json` makes every exported model switchable in Codex's `/model` picker with display names, context windows, and reasoning levels. The catalog has one entry per exported route: `slug` is the client model name, reasoning levels are the route's `effortsMapping` keys that Codex accepts (`minimal`, `low`, `medium`, `high`, `xhigh`), the default level is `defaultEffort` when Codex supports it, and `context_window` and `input_modalities` mirror the route metadata. Routes exported for Codex are the `openai-responses` routes plus anthropic-messages models that set `protocolAdapter: "anthropic2openai"`; models whose provider kind is `codex` remain excluded, and the preview notes unadapted anthropic-messages models with the setting that would include them.
 
-By default the catalog also includes the native models captured from the Codex binary's bundled catalog (`codex debug models --bundled`), so enabling `model_catalog_json` keeps the built-in GPT models pickable alongside the proxy models: proxy entries come first, slug collisions resolve in favor of the proxy route, and picker priorities are reassigned sequentially. The plain `codex debug models` refresh is deliberately not consulted: once `model_catalog_json` is installed it renders that catalog instead of the native one, which would make the capture self-referential. Because the merged catalog is a superset of Codex's own picker, the generated TOML emits `model_catalog_json` uncommented; the comment records the Codex version the native models were captured from — regenerate the export after upgrading Codex. Proxy models also get a real agent prompt: codex requires `base_instructions` on every catalog entry, and the export derives it from the shortest bundled prompt with the GPT identity header replaced by a model-neutral one ("You are Codex, a coding agent. You and the user share one workspace, ..."), so third-party models receive codex's operating guidance (editing constraints, autonomy, skills, communication rules) without GPT identity. A model or variant may set `baseInstructions` to override the prompt outright; without a bundled capture the entry falls back to the minimal "You are Codex, a coding agent.". If the capture adds no models (codex missing, or every native entry collides with a proxy route), the export degrades to proxy-only with a truthful comment, a `warning:` on stderr (exit code stays 0), and a diagnostics warning in the editor. `--no-merge-native` emits a proxy-only catalog directly and comments the `model_catalog_json` line again (a proxy-only catalog replaces the whole picker, dropping the built-in models). The web editor's Codex preview has the same behavior behind a `Merge Native` checkbox (default on, remembered per browser); it captures the bundled catalog once per editor process, and the catalog preview file carries a note reporting how many native models were merged. The editor encodes the current tab, preview runner, and preview file in the URL (`?tab=preview&runner=codex&file=llm-proxy-codex.json`) so a link reopens that view. The Models tab also encodes the open model (`?model=<clientModelName>`; a variant uses the variant's client name and a base model with an empty client name falls back to `providerModelName`), so a link or reload reopens the same model with its branch expanded, and an unknown name selects the first model. A `Form` / `JSON` switch on the model header swaps the field grid for a Monaco JSON editor over exactly that model or variant object (the variant links are the `variants` key inside the base JSON). The JSON editor is served the same vendored bundle as the preview diff and is backed by `/model.schema.json`: property names complete as you type, unknown keys and wrong enum values are marked as errors, and valid input replaces the draft immediately while invalid input leaves the last valid model in place until the JSON parses again. `edit=json` stays in the URL while JSON mode is open, so reload and the next model open in JSON too; returning to `Form` with invalid JSON is refused until it parses. The Codex preview reads on-disk `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`) and shows at most two warnings when `model_provider` is not `"llm-proxy"` or `model_catalog_json` does not point at the generated catalog file. Selecting the `llm-proxy-codex.json` preview file shows an install button that writes the generated catalog to `$CODEX_HOME/llm-proxy-codex.json` (or `~/.codex/llm-proxy-codex.json`): `Create` when the file does not exist, `Update` when it differs from the generated content, and a disabled `Updated` once it matches. The button writes exactly what the preview shows — the current draft and merge state — atomically, and is a no-op when the file is already identical. The proxy serves upstream credentials itself, so the generated snippet carries no auth keys and never sets `requires_openai_auth`.
+By default the catalog also includes the native models captured from the Codex binary's bundled catalog (`codex debug models --bundled`), so enabling `model_catalog_json` keeps the built-in GPT models pickable alongside the proxy models: proxy entries come first, slug collisions resolve in favor of the proxy route, and picker priorities are reassigned sequentially. The plain `codex debug models` refresh is deliberately not consulted: once `model_catalog_json` is installed it renders that catalog instead of the native one, which would make the capture self-referential. Because the merged catalog is a superset of Codex's own picker, the generated TOML emits `model_catalog_json` uncommented; the comment records the Codex version the native models were captured from — regenerate the export after upgrading Codex. Proxy models also get a real agent prompt: codex requires `base_instructions` on every catalog entry, and the export derives it from the shortest bundled prompt with the GPT identity header replaced by a model-neutral one ("You are Codex, a coding agent. You and the user share one workspace, ..."), so third-party models receive codex's operating guidance (editing constraints, autonomy, skills, communication rules) without GPT identity. A model or variant may set `baseInstructions` to override the prompt outright; without a bundled capture the entry falls back to the minimal "You are Codex, a coding agent.". If the capture adds no models (codex missing, or every native entry collides with a proxy route), the export degrades to proxy-only with a truthful comment, a `warning:` on stderr (exit code stays 0), and a diagnostics warning in the editor. `--no-merge-native` emits a proxy-only catalog directly and comments the `model_catalog_json` line again (a proxy-only catalog replaces the whole picker, dropping the built-in models). Codex configuration warnings follow the selected provider table and check its actual `base_url` and `wire_api`; the provider key can have any name. The web editor's Codex preview has the same behavior behind a `Merge Native` checkbox (default on, remembered per browser); it captures the bundled catalog once per editor process, and the catalog preview file carries a note reporting how many native models were merged. The editor encodes the current tab, preview runner, and preview file in the URL (`?tab=preview&runner=codex&file=llm-proxy-codex.json`) so a link reopens that view. The Models tab also encodes the open model (`?model=<clientModelName>`; a variant uses the variant's client name and a base model with an empty client name falls back to `providerModelName`), so a link or reload reopens the same model with its branch expanded, and an unknown name selects the first model. A `Form` / `JSON` switch on the model header swaps the field grid for a Monaco JSON editor over exactly that model or variant object (the variant links are the `variants` key inside the base JSON). The JSON editor is served the same vendored bundle as the preview diff and is backed by `/model.schema.json`: property names complete as you type, unknown keys and wrong enum values are marked as errors, and valid input replaces the draft immediately while invalid input leaves the last valid model in place until the JSON parses again. `edit=json` stays in the URL while JSON mode is open, so reload and the next model open in JSON too; returning to `Form` with invalid JSON is refused until it parses. The Codex preview reads on-disk `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`) and shows at most two warnings when `model_provider` is not `"llm-proxy"` or `model_catalog_json` does not point at the generated catalog file. Selecting the `llm-proxy-codex.json` preview file shows an install button that writes the generated catalog to `$CODEX_HOME/llm-proxy-codex.json` (or `~/.codex/llm-proxy-codex.json`): `Create` when the file does not exist, `Update` when it differs from the generated content, and a disabled `Updated` once it matches. The button writes exactly what the preview shows — the current draft and merge state — atomically, and is a no-op when the file is already identical. The proxy serves upstream credentials itself, so the generated snippet carries no auth keys and never sets `requires_openai_auth`.
 
 ## Route names vs upstream names
 
@@ -174,30 +173,53 @@ receives. Set `clientModelName` only when you want an alias, and remember the
 alias exists nowhere upstream — gateway logs, gateway-side routing, and
 per-model pricing all see `providerModelName`.
 
-An alias is actively misleading when the gateway rewrites whatever it receives.
-AIS Switch maps a requested Claude id through its role map
-(`ANTHROPIC_DEFAULT_<ROLE>_MODEL`), so asking for `claude-opus-5-5` runs
-`glm-5.3-flash`. A route named after the model you want then promises something
-the proxy cannot keep. Prefer the identity form:
+A gateway may itself route a public model id to another implementation. That is
+upstream behavior: llm-proxy forwards the configured `providerModelName` unchanged
+and does not infer mappings from names or read another application's local state.
+Use only ids advertised by the corresponding endpoint; keep a human explanation
+in `displayName` if needed. Preserve existing aliases and defaults when updating
+catalogs.
 
-```json
-{"protocol": "anthropic-messages", "provider": "ais", "providerModelName": "glm-5.3-flash"},
-{"protocol": "openai-responses", "provider": "ais", "providerModelName": "llm-gateway--glm-5.3"}
-```
+### HTTP model catalogs
 
-Both are names AIS serves as-is: on the Claude surface the role-map targets and
-the `[1M]`-free pool models, on the Codex surface the ids from `GET /v1/models`.
-Keep `displayName` for the human label — it is what the Codex picker shows — and
-let it carry the mapping when one exists, as in
-`"AIS - claude-fable-5 (runs glm-5.3-flash)"`. When a route must ask for a
-Claude alias, name the route after that alias and put the real model in
-`displayName`, so neither name lies.
+Each configured HTTP provider is probed independently with `GET {baseUrl}/models`.
+The base already includes `/v1`; the editor does not append another `/v1`, search
+other paths, follow redirects, or fall back to another provider's catalog. Page
+load lists providers without making network requests or reading token files.
+**Probe /models** explicitly refetches one catalog; **Compare** uses its ten-minute
+cache or queries that same endpoint when stale. Caches are separated by endpoint
+and credential. A failed or empty response marks only that catalog incomplete.
+Reads are bounded to 30 seconds and 1 MiB, and concurrent reads of the same catalog
+are refused.
 
-`marcus ais-proxy doctor --config ~/.config/llm-proxy/config.json` (from the spl
-CLI) reports every route whose client name differs from its upstream name and
-every route whose upstream model AIS cannot serve. `marcus ais-proxy config
-llm-proxy update` prints the corrected file to stdout, so it can be diffed before
-it is used, and `-w` replaces the file in place, keeping one `.bak` copy.
+The model list must contain a JSON `data` array. Each usable entry supplies an
+`id`, with optional `reasoning_efforts` and `default_reasoning_effort`. Unknown
+extension fields are ignored. No product detection, local role map, or database
+lookup is performed. Select `openai-responses` or `anthropic-messages` explicitly
+before Probe or Compare. The selection is page-local and is not written to the
+configuration or inferred from existing models, URLs, ports, or model names. A
+Compare deep link without a selection asks for the protocol instead of guessing.
+No seed route is needed, and an empty model list does not prevent discovery.
+
+The generated pane is a pure projection of the normalized `/models` response
+bound to that explicit provider/protocol target. Models follow `data` order;
+fields use a fixed template, and client names are always `<provider>/<id>`.
+Changing existing model order, JSON key order, aliases, fields, variants, or other
+providers cannot change generated bytes. Existing routes are never used as
+templates. Complete reasoning metadata produces identity effort mappings and the
+advertised default. Missing or incomplete metadata uses reasoning disabled as a
+fixed local policy, not an upstream capability claim. When input modality metadata
+is unavailable, generated routes explicitly enable both text and image as the
+local default, not as a verified upstream capability. They do not invent context
+limits or other capabilities.
+
+The editable on-disk pane retains that provider's current objects, field order,
+and aliases, including models the catalog no longer advertises. Those old routes
+are **not** copied into the generated pane. Comparison counts and name-conflict
+warnings may depend on the existing config, but conflicts never filter generated
+models. Saving continues to validate the edited right pane and the complete
+configuration, check its revision, and make a backup; discovery never saves or
+verifies inference. Other runner catalogs keep their existing merge behavior.
 
 ## Browser editor
 
@@ -213,13 +235,17 @@ Models shows a three-level provider → base model → variant tree grouped by c
 
 Validation and the DSH, Codex, and Grok previews use the current draft without writing files or contacting providers. Each preview matches its corresponding `*-models` command, including runner variants, protocol filtering, and native-provider exclusions. Export failures affect only that runner’s preview. Save is explicit and repeats config validation on the server; config errors prevent saving, but export warnings do not. Each preview exposes its generated files as tabs: DSH offers `llm-proxy-dsh.yaml`, Grok offers `llm-proxy-grok.toml`, and Codex offers the `llm-proxy-codex.toml` snippet plus the optional `llm-proxy-codex.json` model catalog. Copy and Download export the selected file; TOML and YAML exports are snippets to merge, not complete replacement files.
 
-The DSH preview also checks `$DSH_HOME/.credentials.yaml` (`~/.dsh/.credentials.yaml` by default) for the `apiKeyEnv` names the export generates. Missing or empty refs are listed as a warning: DSH hides those providers in the model picker until a nonempty placeholder exists. **Add placeholders** writes `PROXY_MANAGED` for missing refs only, never overwrites existing keys, and never returns credential values to the browser. The DSH export also offers **Diff**, which compares the generated `llm-pi-ai` entry with that entry in the Web profile’s `cordis.patch.yml`: the left pane is the generated preview and is read-only, and the right pane is the on-disk entry and is editable. Edit the right pane and press **Save** to write it back. Save replaces only that entry; neighbouring entries, comments, and Cordis `!!js` expressions remain untouched. A pasted patch list is reduced to the one provider entry. Empty submissions, malformed YAML, duplicate provider entries, a different plugin name, and a missing `config.providers` mapping are refused before writing. Each changed save creates a private sibling `cordis.patch.yml.backup-*`, then replaces the patch atomically under the profile’s `package.json.lock`, shared with DSH’s settings editor. Save checks the complete file’s checksum again under that lock; a conflict shows **Save blocked**, and **Reload file** re-reads the entry after confirmation. The editor never removes a lock it did not create. Open the Web profile once before using Save so its directory exists. DSH Web reloads patch changes live. This destination is specific to Web; manually using `$DSH_HOME/cordis.patch.yml` shares routes across profiles, but its higher priority prevents Web settings from overriding those routes. The Codex catalog keeps its own Create/Update flow. The Grok export also offers **Diff**, which compares the generated `[model.*]` tables against the model run in `$GROK_HOME/config.toml` (`~/.grok/config.toml` by default). That comparison is **read-only**: Grok's model tables are shared with other tools, so the same model id can point at a different proxy in your file than in the export (for example an `ais-glm-5-2` entry routing to another local proxy, with its own upstream `model` and `api_key`). The diff reports how many keys both sides define, which of those differ, and how many the export would add, and never writes the file — `POST /api/diff` and `POST /api/sync` answer 404 for it. Runner settings change only through an explicit Save.
+The DSH preview also checks `$DSH_HOME/.credentials.yaml` (`~/.dsh/.credentials.yaml` by default) for the `apiKeyEnv` names the export generates. Missing or empty refs are listed as a warning: DSH hides those providers in the model picker until a nonempty placeholder exists. **Add placeholders** writes `PROXY_MANAGED` for missing refs only, never overwrites existing keys, and never returns credential values to the browser. The DSH export also offers **Diff**, which compares the generated `llm-pi-ai` entry with that entry in the Web profile’s `cordis.patch.yml`: the left pane is the generated preview and is read-only, and the right pane is the on-disk entry and is editable. Edit the right pane and press **Save** to write it back. Save replaces only that entry; neighbouring entries, comments, and Cordis `!!js` expressions remain untouched. A pasted patch list is reduced to the one provider entry. Empty submissions, malformed YAML, duplicate provider entries, a different plugin name, and a missing `config.providers` mapping are refused before writing. Each changed save creates a private sibling `cordis.patch.yml.backup-*`, then replaces the patch atomically under the profile’s `package.json.lock`, shared with DSH’s settings editor. Save checks the complete file’s checksum again under that lock; a conflict shows **Save blocked**, and **Reload file** re-reads the entry after confirmation. The editor never removes a lock it did not create. Open the Web profile once before using Save so its directory exists. DSH Web reloads patch changes live. This destination is specific to Web; manually using `$DSH_HOME/cordis.patch.yml` shares routes across profiles, but its higher priority prevents Web settings from overriding those routes. The Codex catalog keeps its own Create/Update flow. The Grok export also offers **Diff**, which compares the generated `[model.*]` tables against the model run in `$GROK_HOME/config.toml` (`~/.grok/config.toml` by default). That comparison is **read-only**: Grok's model tables are shared with other tools, so the same model id can point at a different proxy in your file than in the export (for example a `gateway-b-model` entry routing to another local proxy, with its own upstream `model` and `api_key`). The diff reports how many keys both sides define, which of those differ, and how many the export would add, and never writes the file — `POST /api/diff` and `POST /api/sync` answer 404 for it. Runner settings change only through an explicit Save.
 
 Models also compares the draft against the model catalog each agent runner ships. Every row names the catalog source and version, how many models it advertises, and what syncing would change: `~/.codex/models_cache.json` (refreshed by Codex itself), `~/.grok/models_cache.json` (written by `grok models`, which the row can run from the editor through **Run grok models**; the row stays highlighted until that file exists), and the Command Code catalog compiled into llm-proxy, which therefore only changes by updating llm-proxy. **Compare** reuses the previews' diff component over two files: the left pane is a generated `config.<provider>.generated.json` holding that provider's routes as the catalog proposes them, and the right pane is `config.json` holding the same provider's routes as they are on disk. Both panes carry the complete model objects, in the order `config.json` writes them, so the diff is the file difference and nothing is abridged. The generated pane takes the catalog `contextWindow` for a route the catalog declares, keeps every other field as written, appends routes no configured route serves (seeded with the provider's existing `inputs`, `reasoning`, and `compat` so they validate), and leaves routes the catalog does not list alone — curated `displayName` values therefore never show as deletions. The right pane is editable, and **Save** writes it back through the ordinary draft Save: the pane's entries replace every route of that provider, so an edited line is an edit, an added line is an addition, and a line you delete is removed from the config after a confirmation that names the routes. Save validates the whole draft first, then writes `config.json` under the same revision guard and `*.backup-*` convention as Save config; a stale revision shows **Save blocked** and **Reload** re-reads the config and the catalog together after confirmation. Because Save writes the whole draft, unsaved Raw JSON edits land as well. Restart the proxy separately to apply the config. **Run grok models** (and any future runner refresh) executes one fixed argv server-side, without a shell and with a 60-second timeout; the browser cannot pass arguments, and the request passes the same same-origin checks as every other editor request.
 
 Each changed save creates a private sibling `config.json.backup-*` file containing the previous bytes, then replaces the selected file atomically while preserving its permission bits. Backups remain until you remove them. External edits detected before replacement reject the save; Reload discards your draft after confirmation and reads the current file. Do not edit the same file concurrently with a noncooperating writer during the final replacement. The editor resolves a symlink at launch and edits its target, without replacing the symlink. Configs must be regular files no larger than 4 MiB.
 
 The local API is unauthenticated: local processes can read and edit the selected config while it runs. It binds only to loopback, checks Host and Origin, rejects cross-origin browser API requests using Fetch Metadata when available, and accepts only JSON writes. It exposes only the selected config, the DSH provider entry a preview owns, and the names of missing DSH `apiKeyEnv` refs, never arbitrary file paths or credential/auth-file contents. Config values can include sensitive data: the Raw JSON view displays them, and backups contain them. Saving does not reload a running proxy, and no runner file is written until you press Create or Update in the Previews tab.
+
+Editable on-disk Monaco panes in Previews and Models Compare support **Cmd+S** on macOS and **Ctrl+S** on Windows/Linux. The shortcut is scoped to the focused editable pane and uses the same Save button, validation, backup, and conflict guards; it never submits unchanged or blocked panes. JSON Monaco editors, including both sides of JSON diffs and the single-model editor, provide native folding arrows and fold/unfold commands. Folding changes only the view, not file content or dirty state; saving a folded pane still writes its complete contents. The Raw JSON textarea is unchanged.
+
+Save-removal, delete, reload, and discard confirmations use one app-styled native HTML dialog, not browser `confirm()` prompts. Destructive actions show explicit labels and scrollable affected-item lists; Cancel is focused initially, Escape cancels, Tab remains inside the modal, and focus returns afterward. Confirmation does not replace server validation, revision checks, or backups. The browser's tab-close/reload warning remains native because browsers control that safeguard.
 
 ### Editor verification
 
