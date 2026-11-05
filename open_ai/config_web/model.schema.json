@@ -124,6 +124,10 @@
           "propertyNames": { "$ref": "#/definitions/effort" },
           "additionalProperties": { "type": "string" }
         },
+        "excluded": {
+          "type": "boolean",
+          "description": "When modelListing.mode is dynamic, omit this advertised model from the serve table."
+        },
         "variants": {
           "type": "array",
           "description": "Variants of this model; each inherits every field it omits.",

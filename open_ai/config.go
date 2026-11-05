@@ -11,6 +11,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/xhd2015/dot-pkgs/go-pkgs/pathfmt"
 	grokapi "github.com/xhd2015/dot-pkgs/go-pkgs/shell/grok/api"
@@ -21,24 +22,33 @@ import (
 )
 
 type proxyConfig struct {
-	Listen    string           `json:"listen"`
-	Log       string           `json:"log"`
-	Providers []configProvider `json:"providers"`
-	Models    []configModel    `json:"models"`
+	Listen       string              `json:"listen"`
+	Log          string              `json:"log"`
+	ModelListing *configModelListing `json:"modelListing"`
+	Providers    []configProvider    `json:"providers"`
+	Models       []configModel       `json:"models"`
+}
+
+type configModelListing struct {
+	Mode            string `json:"mode"`
+	RefreshInterval string `json:"refreshInterval"`
+	ProbeTimeout    string `json:"probeTimeout"`
 }
 
 type configProvider struct {
-	Name         string             `json:"name"`
-	Kind         string             `json:"kind"`
-	Subscription bool               `json:"subscription"`
-	Home         string             `json:"home"`
-	AuthFile     string             `json:"authFile"`
-	Version      string             `json:"version"`
-	BaseURL      string             `json:"baseUrl"`
-	Token        string             `json:"token"`
-	TokenFile    string             `json:"tokenFile"`
-	DummyToken   string             `json:"dummyToken"`
-	Credentials  []configCredential `json:"credentials"`
+	Name          string             `json:"name"`
+	Kind          string             `json:"kind"`
+	Subscription  bool               `json:"subscription"`
+	Home          string             `json:"home"`
+	AuthFile      string             `json:"authFile"`
+	Version       string             `json:"version"`
+	BaseURL       string             `json:"baseUrl"`
+	Protocol      string             `json:"protocol"`
+	ModelListMode string             `json:"modelListMode"`
+	Token         string             `json:"token"`
+	TokenFile     string             `json:"tokenFile"`
+	DummyToken    string             `json:"dummyToken"`
+	Credentials   []configCredential `json:"credentials"`
 }
 
 type configCredential struct {
@@ -80,6 +90,7 @@ type configModel struct {
 	AdjustUsageForDSH *bool             `json:"adjustUsageForDSH"`
 	FeedToGrokCli     *bool             `json:"feedToGrokCli"`
 	EffortMapping     map[string]string `json:"effortMapping"`
+	Excluded          *bool             `json:"excluded"`
 	Variants          []configVariant   `json:"variants"`
 }
 
@@ -201,6 +212,12 @@ func validateProxyConfig(config proxyConfig) ([]effectiveRoute, error) {
 		if provider.Kind != "commandcode" && provider.Kind != "codex" && provider.Kind != "grok" && provider.Kind != "http-proxy" {
 			failures = append(failures, fmt.Errorf("%s: unsupported provider kind %q", where, provider.Kind))
 		}
+		if err := validateProviderListingProtocol(provider, where); err != nil {
+			failures = append(failures, err)
+		}
+		if err := validateProviderModelListMode(provider, where); err != nil {
+			failures = append(failures, err)
+		}
 		if len(provider.Credentials) > 0 {
 			if legacy := providerLegacyAuthFields(provider); len(legacy) > 0 {
 				failures = append(failures, fmt.Errorf("%s: set credentials or legacy %s, not both", where, strings.Join(legacy, ", ")))
@@ -209,7 +226,6 @@ func validateProxyConfig(config proxyConfig) ([]effectiveRoute, error) {
 				failures = append(failures, validateProviderCredential(provider.Kind, cred, fmt.Sprintf("%s.credentials[%d]", where, j))...)
 			}
 			applySelectedCredential(&provider)
-			config.Providers[i] = provider
 		}
 		authFields := httpProxyAuthFieldNames(provider)
 		if provider.Kind != "http-proxy" {
@@ -249,11 +265,28 @@ func validateProxyConfig(config proxyConfig) ([]effectiveRoute, error) {
 	if len(config.Providers) == 0 {
 		failures = append(failures, fmt.Errorf("providers: must not be empty"))
 	}
+	dynamic, listingErr := validateModelListing(config)
+	if listingErr != nil {
+		failures = append(failures, listingErr)
+	}
+	if dynamic {
+		for i, provider := range config.Providers {
+			if provider.Kind != "http-proxy" {
+				continue
+			}
+			if strings.TrimSpace(provider.Protocol) == "" {
+				failures = append(failures, fmt.Errorf("providers[%d]: protocol is required for http-proxy when modelListing.mode is dynamic", i))
+			}
+		}
+	}
 
 	routes := make([]effectiveRoute, 0, len(config.Models))
 	seenNames := make(map[string]string)
 	for i, model := range config.Models {
 		where := fmt.Sprintf("models[%d]", i)
+		if model.excluded() && !dynamic {
+			failures = append(failures, fmt.Errorf("%s: excluded is only valid when modelListing.mode is dynamic", where))
+		}
 		if model.Protocol != "anthropic-messages" && model.Protocol != "openai-responses" {
 			failures = append(failures, fmt.Errorf("%s: unsupported protocol %q", where, model.Protocol))
 		}
@@ -276,8 +309,11 @@ func validateProxyConfig(config proxyConfig) ([]effectiveRoute, error) {
 		if err := validateModelMetadata(model.DisplayName, model.Inputs, model.ContextWindow, model.MaxTokens, where); err != nil {
 			failures = append(failures, err)
 		}
-		if err := validateReasoning(model.Reasoning, where, true); err != nil {
+		if err := validateReasoning(model.Reasoning, where, !dynamic); err != nil {
 			failures = append(failures, err)
+		}
+		if model.excluded() {
+			continue
 		}
 		baseName := model.ClientModelName
 		if baseName == "" {
@@ -286,6 +322,8 @@ func validateProxyConfig(config proxyConfig) ([]effectiveRoute, error) {
 		var reasoning configReasoning
 		if model.Reasoning != nil {
 			reasoning = cloneReasoning(*model.Reasoning)
+		} else {
+			reasoning = configReasoning{Disabled: true}
 		}
 		base := effectiveRoute{protocol: model.Protocol, protocolAdapter: model.ProtocolAdapter, baseInstructions: model.BaseInstructions, clientModelName: baseName, providerModelName: model.ProviderModelName, provider: provider, displayName: model.DisplayName, input: resolveInputs(model.Inputs), contextWindow: model.ContextWindow, maxTokens: model.MaxTokens, compat: cloneBoolMap(model.Compat), reasoning: reasoning, noImage: boolValue(model.NoImage), adjustUsageForDSH: boolValue(model.AdjustUsageForDSH), feedToGrokCli: boolValue(model.FeedToGrokCli), effortMapping: model.EffortMapping, modelIndex: i}
 		if err := addConfigRoute(&routes, seenNames, base, where); err != nil {
@@ -352,7 +390,7 @@ func validateProxyConfig(config proxyConfig) ([]effectiveRoute, error) {
 			}
 		}
 	}
-	if len(config.Models) == 0 {
+	if len(config.Models) == 0 && !dynamic {
 		failures = append(failures, fmt.Errorf("models: must not be empty"))
 	}
 	if len(failures) > 0 {
@@ -510,6 +548,8 @@ func cloneStringPointerMap(values map[string]*string) map[string]*string {
 
 func boolValue(value *bool) bool { return value != nil && *value }
 
+func (model configModel) excluded() bool { return boolValue(model.Excluded) }
+
 func validateAgentRunners(runners []string, where string) error {
 	var failures []error
 	seen := make(map[string]bool, len(runners))
@@ -584,6 +624,9 @@ func startConfigProxy(path string) error {
 	if err != nil {
 		return err
 	}
+	if dynamic, _ := modelListingDynamic(config); dynamic {
+		go handler.refreshModelListingLoop()
+	}
 	fmt.Printf("llm-proxy listening on http://%s\n", config.Listen)
 	fmt.Printf("Routes: %d models across %d providers\n", len(routes), len(config.Providers))
 	if logPath != "" {
@@ -593,9 +636,13 @@ func startConfigProxy(path string) error {
 }
 
 type configHandler struct {
+	mu       sync.RWMutex
 	routes   map[string]effectiveHandlerRoute
 	models   []effectiveRoute
 	endpoint string
+	config   proxyConfig
+	logger   *logutil.Logger
+	status   map[string]providerListingStatus
 }
 
 type effectiveHandlerRoute struct {
@@ -605,7 +652,7 @@ type effectiveHandlerRoute struct {
 
 func newConfigHandler(config proxyConfig, routes []effectiveRoute, logger *logutil.Logger) (*configHandler, error) {
 	endpoint := "http://" + config.Listen + "/v1"
-	h := &configHandler{routes: make(map[string]effectiveHandlerRoute, len(routes)), models: routes, endpoint: endpoint}
+	h := &configHandler{routes: make(map[string]effectiveHandlerRoute, len(routes)), models: routes, endpoint: endpoint, config: config, logger: logger, status: seedListingStatus(config)}
 	for _, route := range routes {
 		handler, err := buildProviderHandler(route, endpoint, logger)
 		if err != nil {
@@ -823,7 +870,7 @@ func (h *configHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	model, _ := request["model"].(string)
-	entry, exists := h.routes[model]
+	entry, exists := h.lookupRoute(model)
 	bridged := exists && entry.route.protocolAdapter != "" &&
 		protocol == "openai-responses" && entry.route.protocol == "anthropic-messages"
 	if !exists || (entry.route.protocol != protocol && !bridged) {
@@ -889,8 +936,21 @@ func protocolForPath(path string) string {
 	}
 }
 
+func (h *configHandler) lookupRoute(model string) (effectiveHandlerRoute, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	entry, exists := h.routes[model]
+	return entry, exists
+}
+
+func (h *configHandler) routeSnapshot() []effectiveRoute {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return append([]effectiveRoute(nil), h.models...)
+}
+
 func (h *configHandler) serveModelsV2(w http.ResponseWriter) {
-	routes := append([]effectiveRoute(nil), h.models...)
+	routes := h.routeSnapshot()
 	sort.Slice(routes, func(i, j int) bool { return routes[i].clientModelName < routes[j].clientModelName })
 	data := make([]map[string]any, 0, len(routes))
 	for _, route := range routes {
@@ -898,28 +958,79 @@ func (h *configHandler) serveModelsV2(w http.ResponseWriter) {
 		if route.protocol == "anthropic-messages" {
 			backend = "messages"
 		}
-		data = append(data, map[string]any{
+		entry := map[string]any{
 			"id":          route.clientModelName,
 			"model":       route.clientModelName,
-			"name":        route.clientModelName,
+			"name":        listingDisplayName(route),
 			"base_url":    h.endpoint,
 			"api_backend": backend,
-		})
+		}
+		if route.contextWindow != nil {
+			entry["context_window"] = *route.contextWindow
+		}
+		data = append(data, entry)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
 }
 
 func (h *configHandler) serveModels(w http.ResponseWriter) {
-	names := make([]string, 0, len(h.models))
-	for _, route := range h.models {
-		names = append(names, route.clientModelName)
-	}
-	sort.Strings(names)
-	data := make([]map[string]string, 0, len(names))
-	for _, name := range names {
-		data = append(data, map[string]string{"id": name, "object": "model"})
+	routes := h.routeSnapshot()
+	sort.Slice(routes, func(i, j int) bool { return routes[i].clientModelName < routes[j].clientModelName })
+	data := make([]map[string]any, 0, len(routes))
+	for _, route := range routes {
+		data = append(data, openAIModelObject(route))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
+}
+
+func listingDisplayName(route effectiveRoute) string {
+	if route.displayName != "" {
+		return route.displayName
+	}
+	return route.clientModelName
+}
+
+func openAIModelObject(route effectiveRoute) map[string]any {
+	object := map[string]any{
+		"id":     route.clientModelName,
+		"object": "model",
+	}
+	if route.provider.Name != "" {
+		object["owned_by"] = route.provider.Name
+	}
+	if route.protocol != "" {
+		object["protocol"] = route.protocol
+	}
+	if route.providerModelName != "" {
+		object["provider_model"] = route.providerModelName
+	}
+	if route.displayName != "" {
+		object["display_name"] = route.displayName
+	}
+	if route.contextWindow != nil {
+		object["context_window"] = *route.contextWindow
+	}
+	if route.maxTokens != nil {
+		object["max_tokens"] = *route.maxTokens
+	}
+	if len(route.input) > 0 {
+		object["input_modalities"] = append([]string(nil), route.input...)
+	}
+	if route.reasoning.Disabled {
+		object["reasoning"] = map[string]any{"disabled": true}
+	} else if route.reasoning.DefaultEffort != "" {
+		efforts := make([]string, 0, len(route.reasoning.EffortsMapping))
+		for effort := range route.reasoning.EffortsMapping {
+			efforts = append(efforts, effort)
+		}
+		sort.Strings(efforts)
+		object["reasoning"] = map[string]any{
+			"disabled":       false,
+			"default_effort": route.reasoning.DefaultEffort,
+			"efforts":        efforts,
+		}
+	}
+	return object
 }

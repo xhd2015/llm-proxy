@@ -73,6 +73,7 @@ Options:
   grok-models                     print Grok model configuration; with --config, use configured routes
   lint                            validate a configuration file
   dsh-models                      print Deepseek Harness configuration from --config routes
+  model-listing                   print or refresh the configured model listing
   web                             open a local editor for --config with DSH, Codex, and Grok previews
 
 Examples:
@@ -182,6 +183,8 @@ func Handle(args []string) error {
 			return handleGrokModels(commandArgs)
 		case "dsh-models":
 			return handleConfigModels(configFile, command, commandArgs)
+		case "model-listing":
+			return handleModelListing(configFile, commandArgs)
 		default:
 			if configFile != "" {
 				return fmt.Errorf("unknown --config command: %s", command)

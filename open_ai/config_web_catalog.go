@@ -248,12 +248,19 @@ func loadGrokCatalogSource(source catalogSource) (catalogSource, error) {
 		GrokVersion string `json:"grok_version"`
 		Models      map[string]struct {
 			Info struct {
-				ID             string `json:"id"`
-				Name           string `json:"name"`
-				Hidden         bool   `json:"hidden"`
-				SupportedInAPI bool   `json:"supported_in_api"`
-				ContextWindow  int    `json:"context_window"`
-				ContextWindows []int  `json:"context_windows"`
+				ID                      string `json:"id"`
+				Name                    string `json:"name"`
+				Hidden                  bool   `json:"hidden"`
+				SupportedInAPI          bool   `json:"supported_in_api"`
+				ContextWindow           int    `json:"context_window"`
+				ContextWindows          []int  `json:"context_windows"`
+				ReasoningEffort         string `json:"reasoning_effort"`
+				SupportsReasoningEffort *bool  `json:"supports_reasoning_effort"`
+				ReasoningEfforts        []struct {
+					ID      string `json:"id"`
+					Value   string `json:"value"`
+					Default bool   `json:"default"`
+				} `json:"reasoning_efforts"`
 			} `json:"info"`
 		} `json:"models"`
 	}
@@ -279,12 +286,56 @@ func loadGrokCatalogSource(source catalogSource) (catalogSource, error) {
 			ContextWindow:   info.ContextWindow,
 			DeclaredWindows: declared,
 			Hidden:          info.Hidden || !info.SupportedInAPI,
+			Reasoning:       grokCacheReasoning(info.SupportsReasoningEffort, info.ReasoningEffort, info.ReasoningEfforts),
 		})
 	}
 	if source.Version == "" {
 		source.Version = "grok cli"
 	}
 	return source, nil
+}
+
+func grokCacheReasoning(supports *bool, defaultEffort string, efforts []struct {
+	ID      string `json:"id"`
+	Value   string `json:"value"`
+	Default bool   `json:"default"`
+}) *configReasoning {
+	if supports != nil && !*supports {
+		return &configReasoning{Disabled: true}
+	}
+	names := make([]string, 0, len(efforts))
+	for _, effort := range efforts {
+		name := effort.ID
+		if name == "" {
+			name = effort.Value
+		}
+		if name == "" {
+			continue
+		}
+		if !validReasoningEffort(name) {
+			continue
+		}
+		names = append(names, name)
+		if effort.Default {
+			defaultEffort = name
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	mapping := map[string]*string{}
+	for _, name := range names {
+		value := name
+		mapping[name] = &value
+	}
+	if defaultEffort == "" || mapping[defaultEffort] == nil {
+		if mapping["high"] != nil {
+			defaultEffort = "high"
+		} else {
+			defaultEffort = names[0]
+		}
+	}
+	return &configReasoning{DefaultEffort: defaultEffort, EffortsMapping: mapping}
 }
 
 // loadCommandCodeCatalogSource uses the catalog compiled into the binary, so

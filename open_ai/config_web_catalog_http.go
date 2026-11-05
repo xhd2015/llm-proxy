@@ -32,6 +32,12 @@ var (
 // Model lists are data, not product identification. Unknown fields are ignored.
 type httpProxyModelEntry struct {
 	ID                     string   `json:"id"`
+	Name                   string   `json:"name,omitempty"`
+	DisplayName            string   `json:"display_name,omitempty"`
+	ContextWindow          int      `json:"context_window,omitempty"`
+	ContextLength          int      `json:"context_length,omitempty"`
+	MaxTokens              int      `json:"max_tokens,omitempty"`
+	MaxOutputTokens        int      `json:"max_output_tokens,omitempty"`
 	ReasoningEfforts       []string `json:"reasoning_efforts,omitempty"`
 	DefaultReasoningEffort string   `json:"default_reasoning_effort,omitempty"`
 }
@@ -155,8 +161,11 @@ func loadHTTPProxyCatalog(ctx context.Context, provider configProvider, refresh 
 }
 
 func fetchHTTPProxyCatalog(ctx context.Context, target httpProxyEndpoint) (httpProxyCachedCatalog, error) {
-	ctx, cancel := context.WithTimeout(ctx, httpProxyProbeTimeout)
-	defer cancel()
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, httpProxyProbeTimeout)
+		defer cancel()
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.URL, nil)
 	if err != nil {
 		return httpProxyCachedCatalog{}, err

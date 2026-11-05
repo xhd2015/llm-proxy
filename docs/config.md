@@ -17,6 +17,8 @@ for when that default should not be overridden.
 
 `lint` validates JSON fields and types, provider references, model metadata, and resolved route names without modifying files or contacting providers. It reports independent errors with field paths on stderr and exits 1. Invalid provider declarations suppress dependent protocol errors. A config valid for serving but unavailable for DSH export produces a warning and exits 0. Success prints provider and route counts on stdout. Both `lint --config FILE` and `--config FILE lint` are supported; `lint --help` requires no config file.
 
+Set `modelListing.mode` to `"dynamic"` to probe each provider at start and every `refreshInterval` (default 1h). `models` is then the startup seed and the override list keyed by `(protocol, provider, providerModelName)`; it may be empty. An `http-proxy` provider must set `protocol` in this mode. A model row may set `excluded: true` to drop an advertised id. Probe results are not written back to `config.json`. See [Dynamic model listing](live-catalog.md).
+
 ```json
 {
   "listen": "127.0.0.1:8890",

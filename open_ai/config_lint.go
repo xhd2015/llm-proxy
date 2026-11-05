@@ -158,6 +158,10 @@ func handleConfigLint(path string, args []string, stdout, stderr io.Writer) erro
 	if diagnosticErrors(diagnostics) != nil {
 		return configLintFailure{}
 	}
+	if dynamic, _ := modelListingDynamic(config); dynamic {
+		fmt.Fprintf(stdout, "Config valid: %d providers, %d model routes, modelListing.mode: dynamic.\n", len(config.Providers), len(routes))
+		return nil
+	}
 	fmt.Fprintf(stdout, "Config valid: %d providers, %d model routes.\n", len(config.Providers), len(routes))
 	return nil
 }
