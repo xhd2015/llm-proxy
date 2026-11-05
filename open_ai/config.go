@@ -550,12 +550,16 @@ func boolValue(value *bool) bool { return value != nil && *value }
 
 func (model configModel) excluded() bool { return boolValue(model.Excluded) }
 
+// supportedAgentRunners lists the client runners the variant vocabulary defines,
+// in alphabetical order for diagnostics.
+var supportedAgentRunners = []string{"codex", "dsh", "grok"}
+
 func validateAgentRunners(runners []string, where string) error {
 	var failures []error
 	seen := make(map[string]bool, len(runners))
 	for _, runner := range runners {
-		if runner != "codex" && runner != "grok" && runner != "dsh" {
-			failures = append(failures, fmt.Errorf("%s: unsupported agentRunner %q", where, runner))
+		if !containsString(supportedAgentRunners, runner) {
+			failures = append(failures, fmt.Errorf("%s: unsupported agentRunner %q (want %s)", where, runner, strings.Join(supportedAgentRunners, ", ")))
 		}
 		if seen[runner] {
 			failures = append(failures, fmt.Errorf("%s: duplicate agentRunner %q", where, runner))
@@ -565,21 +569,34 @@ func validateAgentRunners(runners []string, where string) error {
 	return errors.Join(failures...)
 }
 
+// routeModelBlock identifies one configured model together with the variants
+// declared beside it. The provider participates in the key because a dynamic
+// listing re-validates each provider independently, so modelIndex repeats across
+// providers in the merged route table.
+type routeModelBlock struct {
+	provider   string
+	modelIndex int
+}
+
+// routesForAgentRunner narrows a route table to the routes one client runner can
+// use: a model that declares a variant for the runner contributes only those
+// variants, while a model that declares none keeps its base route so clients
+// that never configured a variant stay reachable. Blocks keep their input order.
 func routesForAgentRunner(routes []effectiveRoute, runner string) []effectiveRoute {
-	byModel := make(map[int][]effectiveRoute)
-	indices := make([]int, 0)
+	byModel := make(map[routeModelBlock][]effectiveRoute, len(routes))
+	blocks := make([]routeModelBlock, 0, len(routes))
 	for _, route := range routes {
-		if _, exists := byModel[route.modelIndex]; !exists {
-			indices = append(indices, route.modelIndex)
+		key := routeModelBlock{provider: route.provider.Name, modelIndex: route.modelIndex}
+		if _, exists := byModel[key]; !exists {
+			blocks = append(blocks, key)
 		}
-		byModel[route.modelIndex] = append(byModel[route.modelIndex], route)
+		byModel[key] = append(byModel[key], route)
 	}
-	sort.Ints(indices)
 	selected := make([]effectiveRoute, 0, len(routes))
-	for _, index := range indices {
+	for _, key := range blocks {
 		var base *effectiveRoute
 		var variants []effectiveRoute
-		for _, route := range byModel[index] {
+		for _, route := range byModel[key] {
 			if !route.isVariant {
 				route := route
 				base = &route
@@ -843,11 +860,11 @@ func buildProviderProtocolHandler(route effectiveRoute, endpoint string, logger 
 
 func (h *configHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
-		h.serveModels(w)
+		h.serveModels(w, r)
 		return
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/models-v2" {
-		h.serveModelsV2(w)
+		h.serveModelsV2(w, r)
 		return
 	}
 	protocol := protocolForPath(r.URL.Path)
@@ -949,9 +966,51 @@ func (h *configHandler) routeSnapshot() []effectiveRoute {
 	return append([]effectiveRoute(nil), h.models...)
 }
 
-func (h *configHandler) serveModelsV2(w http.ResponseWriter) {
+// listingRunnerParam carries the client runner a listing request is for. A
+// request without it lists every route, variants included.
+const listingRunnerParam = "agent-runner"
+
+// parseListingRunner reads the optional runner from a listing request query. A
+// missing or empty parameter means "list everything"; a value outside the
+// variant vocabulary is a client misconfiguration rather than a request to skip
+// filtering, and a repeated parameter names no single runner at all.
+func parseListingRunner(r *http.Request) (string, error) {
+	values := r.URL.Query()[listingRunnerParam]
+	if len(values) > 1 {
+		return "", fmt.Errorf("%s given %d times (want one)", listingRunnerParam, len(values))
+	}
+	runner := ""
+	if len(values) == 1 {
+		runner = strings.TrimSpace(values[0])
+	}
+	if runner == "" || containsString(supportedAgentRunners, runner) {
+		return runner, nil
+	}
+	return "", fmt.Errorf("unsupported %s %q (want %s)", listingRunnerParam, runner, strings.Join(supportedAgentRunners, ", "))
+}
+
+// listedRoutes returns the route table one listing response describes: every
+// route when the request names no runner, otherwise only the routes that runner
+// can use, sorted by client model name.
+func (h *configHandler) listedRoutes(r *http.Request) ([]effectiveRoute, error) {
+	runner, err := parseListingRunner(r)
+	if err != nil {
+		return nil, err
+	}
 	routes := h.routeSnapshot()
+	if runner != "" {
+		routes = routesForAgentRunner(routes, runner)
+	}
 	sort.Slice(routes, func(i, j int) bool { return routes[i].clientModelName < routes[j].clientModelName })
+	return routes, nil
+}
+
+func (h *configHandler) serveModelsV2(w http.ResponseWriter, r *http.Request) {
+	routes, err := h.listedRoutes(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	data := make([]map[string]any, 0, len(routes))
 	for _, route := range routes {
 		backend := "responses"
@@ -974,9 +1033,12 @@ func (h *configHandler) serveModelsV2(w http.ResponseWriter) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
 }
 
-func (h *configHandler) serveModels(w http.ResponseWriter) {
-	routes := h.routeSnapshot()
-	sort.Slice(routes, func(i, j int) bool { return routes[i].clientModelName < routes[j].clientModelName })
+func (h *configHandler) serveModels(w http.ResponseWriter, r *http.Request) {
+	routes, err := h.listedRoutes(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	data := make([]map[string]any, 0, len(routes))
 	for _, route := range routes {
 		data = append(data, openAIModelObject(route))
