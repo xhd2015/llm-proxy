@@ -3,15 +3,15 @@ package openai
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/xhd2015/llm-proxy/pkgs/modelcatalog"
 )
 
 const (
@@ -30,17 +30,7 @@ var (
 )
 
 // Model lists are data, not product identification. Unknown fields are ignored.
-type httpProxyModelEntry struct {
-	ID                     string   `json:"id"`
-	Name                   string   `json:"name,omitempty"`
-	DisplayName            string   `json:"display_name,omitempty"`
-	ContextWindow          int      `json:"context_window,omitempty"`
-	ContextLength          int      `json:"context_length,omitempty"`
-	MaxTokens              int      `json:"max_tokens,omitempty"`
-	MaxOutputTokens        int      `json:"max_output_tokens,omitempty"`
-	ReasoningEfforts       []string `json:"reasoning_efforts,omitempty"`
-	DefaultReasoningEffort string   `json:"default_reasoning_effort,omitempty"`
-}
+type httpProxyModelEntry = modelcatalog.Model
 
 type httpProxyProbe struct {
 	Provider  string                `json:"provider"`
@@ -161,41 +151,16 @@ func loadHTTPProxyCatalog(ctx context.Context, provider configProvider, refresh 
 }
 
 func fetchHTTPProxyCatalog(ctx context.Context, target httpProxyEndpoint) (httpProxyCachedCatalog, error) {
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, httpProxyProbeTimeout)
-		defer cancel()
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.URL, nil)
+	cat, err := (&modelcatalog.Client{}).Fetch(ctx, modelcatalog.Endpoint{URL: target.URL, Token: target.Token, Auth: target.Auth})
 	if err != nil {
 		return httpProxyCachedCatalog{}, err
 	}
-	request.Header.Set("Accept", "application/json")
-	if target.Token != "" {
-		request.Header.Set("Authorization", "Bearer "+target.Token)
+	for _, model := range cat.Models {
+		if _, err := httpProxyModelReasoning(model); err != nil {
+			return httpProxyCachedCatalog{}, err
+		}
 	}
-	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	response, err := client.Do(request)
-	if err != nil {
-		return httpProxyCachedCatalog{}, fmt.Errorf("GET %s: %w", target.URL, err)
-	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, httpProxyProbeMaxBytes+1))
-	if err != nil {
-		return httpProxyCachedCatalog{}, fmt.Errorf("reading %s: %w", target.URL, err)
-	}
-	if len(body) > httpProxyProbeMaxBytes {
-		return httpProxyCachedCatalog{}, fmt.Errorf("%s returned more than %d bytes", target.URL, httpProxyProbeMaxBytes)
-	}
-	if response.StatusCode < 200 || response.StatusCode > 299 {
-		return httpProxyCachedCatalog{}, fmt.Errorf("GET %s returned %s%s", target.URL, response.Status, httpProxyProbeExcerptText(body))
-	}
-	catalog, err := parseHTTPProxyCatalog(body)
-	if err != nil {
-		return httpProxyCachedCatalog{}, fmt.Errorf("%s: %w", target.URL, err)
-	}
-	catalog.FetchedAt, catalog.Auth = time.Now(), target.Auth
-	return catalog, nil
+	return httpProxyCachedCatalog{FetchedAt: cat.FetchedAt, Models: cat.Models, Notes: cat.Notes, Auth: cat.Auth}, nil
 }
 
 func httpProxyProbeExcerptText(body []byte) string {
@@ -210,46 +175,18 @@ func httpProxyProbeExcerptText(body []byte) string {
 }
 
 func parseHTTPProxyCatalog(body []byte) (httpProxyCachedCatalog, error) {
-	var payload struct {
-		Data []json.RawMessage `json:"data"`
+	cat, err := modelcatalog.Parse(body)
+	if err != nil {
+		return httpProxyCachedCatalog{}, err
 	}
-	if err := json.Unmarshal(body, &payload); err != nil || payload.Data == nil {
-		return httpProxyCachedCatalog{}, errors.New("expected a JSON object with a data model array")
-	}
-	catalog := httpProxyCachedCatalog{Models: make([]httpProxyModelEntry, 0, len(payload.Data))}
-	seen := map[string]bool{}
-	skipped, unknownReasoning := 0, 0
-	for _, raw := range payload.Data {
-		var model httpProxyModelEntry
-		if err := json.Unmarshal(raw, &model); err != nil {
-			return httpProxyCachedCatalog{}, errors.New("a model entry has invalid id or reasoning metadata types")
-		}
-		if strings.TrimSpace(model.ID) == "" || seen[model.ID] {
-			skipped++
-			continue
-		}
-		if model.ID != strings.TrimSpace(model.ID) {
-			return httpProxyCachedCatalog{}, errors.New("a model id has surrounding whitespace")
-		}
-		seen[model.ID] = true
+	// Preserve proxy-specific validation. Generic discovery accepts new upstream
+	// vocabulary; individual clients must filter their own supported efforts.
+	for _, model := range cat.Models {
 		if _, err := httpProxyModelReasoning(model); err != nil {
 			return httpProxyCachedCatalog{}, err
 		}
-		if len(model.ReasoningEfforts) == 0 || model.DefaultReasoningEffort == "" {
-			unknownReasoning++
-		}
-		catalog.Models = append(catalog.Models, model)
 	}
-	if len(catalog.Models) == 0 {
-		return httpProxyCachedCatalog{}, errors.New("the endpoint returned no model ids; this catalog is incomplete")
-	}
-	if skipped > 0 {
-		catalog.Notes = append(catalog.Notes, fmt.Sprintf("skipped %d duplicate or empty ids.", skipped))
-	}
-	if unknownReasoning > 0 {
-		catalog.Notes = append(catalog.Notes, fmt.Sprintf("%d models omit complete reasoning metadata; generated routes use reasoning disabled as a local policy, not a capability claim.", unknownReasoning))
-	}
-	return catalog, nil
+	return httpProxyCachedCatalog{FetchedAt: cat.FetchedAt, Models: cat.Models, Notes: cat.Notes, Auth: cat.Auth}, nil
 }
 
 func httpProxyModelReasoning(model httpProxyModelEntry) (*configReasoning, error) {

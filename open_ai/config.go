@@ -19,6 +19,7 @@ import (
 	logutil "github.com/xhd2015/llm-proxy/log"
 	"github.com/xhd2015/llm-proxy/pkgs/anthropic2openai"
 	"github.com/xhd2015/llm-proxy/pkgs/anthropicthinking"
+	"github.com/xhd2015/llm-proxy/pkgs/modelcatalog"
 )
 
 type proxyConfig struct {
@@ -35,32 +36,9 @@ type configModelListing struct {
 	ProbeTimeout    string `json:"probeTimeout"`
 }
 
-type configProvider struct {
-	Name          string             `json:"name"`
-	Kind          string             `json:"kind"`
-	Subscription  bool               `json:"subscription"`
-	Home          string             `json:"home"`
-	AuthFile      string             `json:"authFile"`
-	Version       string             `json:"version"`
-	BaseURL       string             `json:"baseUrl"`
-	Protocol      string             `json:"protocol"`
-	ModelListMode string             `json:"modelListMode"`
-	Token         string             `json:"token"`
-	TokenFile     string             `json:"tokenFile"`
-	DummyToken    string             `json:"dummyToken"`
-	Credentials   []configCredential `json:"credentials"`
-}
+type configProvider = modelcatalog.Provider
 
-type configCredential struct {
-	Name       string `json:"name"`
-	Selected   bool   `json:"selected"`
-	Home       string `json:"home"`
-	AuthFile   string `json:"authFile"`
-	BaseURL    string `json:"baseUrl"`
-	Token      string `json:"token"`
-	TokenFile  string `json:"tokenFile"`
-	DummyToken string `json:"dummyToken"`
-}
+type configCredential = modelcatalog.Credential
 
 type configInput struct {
 	Type     string `json:"type"`
@@ -746,25 +724,7 @@ func providerLegacyAuthFields(provider configProvider) []string {
 	return names
 }
 
-func applySelectedCredential(provider *configProvider) {
-	if len(provider.Credentials) == 0 {
-		return
-	}
-	idx := 0
-	for i, cred := range provider.Credentials {
-		if cred.Selected {
-			idx = i
-			break
-		}
-	}
-	cred := provider.Credentials[idx]
-	provider.Home = cred.Home
-	provider.AuthFile = cred.AuthFile
-	provider.BaseURL = cred.BaseURL
-	provider.Token = cred.Token
-	provider.TokenFile = cred.TokenFile
-	provider.DummyToken = cred.DummyToken
-}
+func applySelectedCredential(provider *configProvider) { provider.ApplySelected() }
 
 func validateProviderCredential(kind string, cred configCredential, where string) []error {
 	var failures []error
