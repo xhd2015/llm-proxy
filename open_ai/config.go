@@ -622,6 +622,7 @@ func startConfigProxy(path string) error {
 		return err
 	}
 	handler.configPath = path
+	handler.logPath = logPath
 	go handler.refreshModelListingLoop(context.Background())
 	fmt.Printf("llm-proxy listening on http://%s\n", config.Listen)
 	fmt.Printf("Routes: %d models across %d providers\n", len(routes), len(config.Providers))
@@ -643,6 +644,9 @@ type configHandler struct {
 	// endpoint stays fixed for the lifetime of the handler: PublicBase in
 	// embedded mode, or the listen address for the standalone binary.
 	configPath string
+	// logPath is the file this proxy appends its own messages to. The embedding
+	// host supplies it; the standalone binary resolves it from the config.
+	logPath    string
 	startedAt  time.Time
 	generation uint64
 	wake       chan struct{}

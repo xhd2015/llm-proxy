@@ -22,9 +22,13 @@ type EmbedOptions struct {
 	// (for example https://host/api/llm-proxy/v1). Empty keeps the standalone
 	// default of http://<listen>/v1.
 	PublicBase string
-	// Logger receives model listing and control-plane messages. Nil falls back
-	// to the log file named by the config.
+	// Logger receives model listing and control-plane messages. Nil opens
+	// LogFile, or the log file named by the config when LogFile is empty too.
 	Logger *logutil.Logger
+	// LogFile is where the embedded proxy appends its own messages. A host that
+	// runs the standalone form under a supervisor passes the same path both
+	// ways so switching modes never moves the log.
+	LogFile string
 }
 
 // EmbeddedServer is a proxy running inside another Go program. It implements
@@ -51,9 +55,12 @@ func StartEmbedded(opts EmbedOptions) (*EmbeddedServer, error) {
 		return nil, fmt.Errorf("embed llm-proxy: %w", err)
 	}
 	logger := opts.Logger
+	logPath := strings.TrimSpace(opts.LogFile)
 	var closer interface{ Close() error }
 	if logger == nil {
-		logPath, _ := logutil.ResolveLogFile(config.Log)
+		if logPath == "" {
+			logPath, _ = logutil.ResolveLogFile(config.Log)
+		}
 		opened, openedCloser, err := logutil.OpenAppend(logPath)
 		if err != nil {
 			return nil, err
@@ -71,6 +78,7 @@ func StartEmbedded(opts EmbedOptions) (*EmbeddedServer, error) {
 		return nil, err
 	}
 	handler.configPath = configPath
+	handler.logPath = logPath
 	if base := strings.TrimRight(strings.TrimSpace(opts.PublicBase), "/"); base != "" {
 		handler.endpoint = base
 	}

@@ -94,18 +94,25 @@ type ProviderReport struct {
 
 // StatusReport is the full control-plane snapshot.
 type StatusReport struct {
-	Listen       string           `json:"listen"`
-	Endpoint     string           `json:"endpoint"`
-	ConfigPath   string           `json:"configPath,omitempty"`
-	Models       int              `json:"models"`
-	Providers    []ProviderReport `json:"providers"`
-	ModelListing struct {
-		Mode            string `json:"mode"`
-		RefreshInterval string `json:"refreshInterval,omitempty"`
-		ProbeTimeout    string `json:"probeTimeout,omitempty"`
-	} `json:"modelListing"`
-	UptimeMillis int64  `json:"uptimeMillis"`
-	Generation   uint64 `json:"generation"`
+	Listen     string `json:"listen"`
+	Endpoint   string `json:"endpoint"`
+	ConfigPath string `json:"configPath,omitempty"`
+	// LogPath is the file this proxy appends its own messages to. Empty when
+	// the host mounted it with a logger it owns.
+	LogPath      string             `json:"logPath,omitempty"`
+	Models       int                `json:"models"`
+	Providers    []ProviderReport   `json:"providers"`
+	ModelListing ModelListingReport `json:"modelListing"`
+	UptimeMillis int64              `json:"uptimeMillis"`
+	Generation   uint64             `json:"generation"`
+}
+
+// ModelListingReport describes how model names are resolved: a static list from
+// the config, or names fetched from the provider on a schedule.
+type ModelListingReport struct {
+	Mode            string `json:"mode"`
+	RefreshInterval string `json:"refreshInterval,omitempty"`
+	ProbeTimeout    string `json:"probeTimeout,omitempty"`
 }
 
 func (h *configHandler) configSnapshot() proxyConfig {
@@ -468,34 +475,31 @@ func credentialAvailable(kind string, credential configCredential) (bool, string
 func (h *configHandler) Status() StatusReport {
 	config := h.configSnapshot()
 	models := h.modelsSnapshot()
-	listing := h.listingStatusSnapshot()
-	perProvider := make(map[string]int, len(config.Providers))
-	for _, route := range models {
-		perProvider[route.provider.Name]++
-	}
 
 	report := StatusReport{
 		Listen:     config.Listen,
 		Endpoint:   h.endpoint,
 		ConfigPath: h.configPath,
+		LogPath:    h.logPath,
 		Models:     len(models),
-		Providers:  make([]ProviderReport, 0, len(config.Providers)),
+		Providers:  providerReportsOf(config, models, h.listingStatusSnapshot()),
 	}
-	mode := ""
-	if config.ModelListing != nil {
-		mode = strings.TrimSpace(config.ModelListing.Mode)
-		if mode == "" {
-			mode = "static"
-		}
-		report.ModelListing.Mode = mode
-		report.ModelListing.RefreshInterval = config.ModelListing.RefreshInterval
-		report.ModelListing.ProbeTimeout = config.ModelListing.ProbeTimeout
-	} else {
-		report.ModelListing.Mode = "static"
-	}
+	report.ModelListing = modelListingReportOf(config)
 	report.UptimeMillis = time.Since(h.startedAt).Milliseconds()
 	report.Generation = h.generationSnapshot()
+	return report
+}
 
+// providerReportsOf describes every configured provider: how many live routes
+// it owns, which credential is selected, and whether each one is usable right
+// now. Status and InspectConfig share it so a stopped service and a running one
+// describe the same config the same way.
+func providerReportsOf(config proxyConfig, models []effectiveRoute, listing map[string]providerListingStatus) []ProviderReport {
+	perProvider := make(map[string]int, len(config.Providers))
+	for _, route := range models {
+		perProvider[route.provider.Name]++
+	}
+	providers := make([]ProviderReport, 0, len(config.Providers))
 	for _, provider := range config.Providers {
 		entry := ProviderReport{
 			Name:    provider.Name,
@@ -516,8 +520,23 @@ func (h *configHandler) Status() StatusReport {
 		if selected >= 0 {
 			entry.Selected = provider.Credentials[selected].Name
 		}
-		report.Providers = append(report.Providers, entry)
+		providers = append(providers, entry)
 	}
+	return providers
+}
+
+// modelListingReportOf fills the listing section shared by Status and
+// InspectConfig. A config without a modelListing block is static.
+func modelListingReportOf(config proxyConfig) (report ModelListingReport) {
+	report.Mode = "static"
+	if config.ModelListing == nil {
+		return report
+	}
+	if mode := strings.TrimSpace(config.ModelListing.Mode); mode != "" {
+		report.Mode = mode
+	}
+	report.RefreshInterval = config.ModelListing.RefreshInterval
+	report.ProbeTimeout = config.ModelListing.ProbeTimeout
 	return report
 }
 
