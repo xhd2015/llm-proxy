@@ -184,28 +184,91 @@ func (h *configHandler) listingStatusSnapshot() map[string]providerListingStatus
 	return out
 }
 
-func (h *configHandler) refreshModelListingLoop() {
-	h.refreshModelListing(context.Background())
-	ticker := time.NewTicker(modelListingRefreshInterval(h.config))
-	defer ticker.Stop()
-	for range ticker.C {
-		h.refreshModelListing(context.Background())
+// refreshModelListingLoop probes providers on a timer that is re-read from the
+// live config every round, so an edited refreshInterval takes effect without a
+// restart. A wake signal (manual refresh, reload, account switch) probes early.
+// In static mode the loop idles instead of exiting: a reload can switch the
+// mode to dynamic at runtime.
+func (h *configHandler) refreshModelListingLoop(ctx context.Context) {
+	refresh := func() {
+		h.refreshModelListing(ctx)
+	}
+	if h.dynamicListing() {
+		refresh()
+	}
+	for {
+		timer := time.NewTimer(modelListingRefreshInterval(h.configSnapshot()))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-h.wake:
+			timer.Stop()
+			if h.dynamicListing() {
+				refresh()
+			}
+		case <-timer.C:
+			if h.dynamicListing() {
+				refresh()
+			}
+		}
 	}
 }
 
+// wakeModelListingLoop asks the loop to probe now without blocking the caller.
+func (h *configHandler) wakeModelListingLoop() {
+	if h.wake == nil {
+		return
+	}
+	select {
+	case h.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (h *configHandler) dynamicListing() bool {
+	dynamic, err := modelListingDynamic(h.configSnapshot())
+	return err == nil && dynamic
+}
+
 func (h *configHandler) refreshModelListing(ctx context.Context) {
-	routes, status, err := refreshDynamicRoutes(ctx, h.config, h.logger)
+	config := h.configSnapshot()
+	generation := h.generationSnapshot()
+	routes, status, err := refreshDynamicRoutes(ctx, config, h.logger)
 	if err != nil {
 		if h.logger != nil {
 			h.logger.Printf("model listing refresh failed: %v", err)
 		}
 		return
 	}
-	if err := h.replaceRoutes(routes, status); err != nil {
+	if ctx.Err() != nil {
+		return
+	}
+	// A probe that raced a config change describes the old config: drop it
+	// rather than resurrect routes that no longer exist.
+	if err := h.replaceRoutesAtGeneration(routes, status, generation); err != nil {
 		if h.logger != nil {
 			h.logger.Printf("model listing apply failed: %v", err)
 		}
 	}
+}
+
+// replaceRoutesAtGeneration installs probed routes only when the config they
+// were derived from is still current.
+func (h *configHandler) replaceRoutesAtGeneration(routes []effectiveRoute, status map[string]providerListingStatus, generation uint64) error {
+	built, err := h.buildRouteTable(routes)
+	if err != nil {
+		return err
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.generation != generation {
+		return nil
+	}
+	h.routes = built
+	h.models = routes
+	h.status = status
+	return nil
 }
 
 func refreshDynamicRoutes(ctx context.Context, config proxyConfig, logger *logutil.Logger) ([]effectiveRoute, map[string]providerListingStatus, error) {

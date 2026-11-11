@@ -2,6 +2,7 @@ package openai
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/xhd2015/dot-pkgs/go-pkgs/pathfmt"
 	grokapi "github.com/xhd2015/dot-pkgs/go-pkgs/shell/grok/api"
@@ -619,9 +621,8 @@ func startConfigProxy(path string) error {
 	if err != nil {
 		return err
 	}
-	if dynamic, _ := modelListingDynamic(config); dynamic {
-		go handler.refreshModelListingLoop()
-	}
+	handler.configPath = path
+	go handler.refreshModelListingLoop(context.Background())
 	fmt.Printf("llm-proxy listening on http://%s\n", config.Listen)
 	fmt.Printf("Routes: %d models across %d providers\n", len(routes), len(config.Providers))
 	if logPath != "" {
@@ -638,6 +639,17 @@ type configHandler struct {
 	config   proxyConfig
 	logger   *logutil.Logger
 	status   map[string]providerListingStatus
+
+	// endpoint stays fixed for the lifetime of the handler: PublicBase in
+	// embedded mode, or the listen address for the standalone binary.
+	configPath string
+	startedAt  time.Time
+	generation uint64
+	wake       chan struct{}
+
+	// applyMu serializes config mutations (reload, account switch) so two
+	// concurrent switches cannot interleave their writes or route swaps.
+	applyMu sync.Mutex
 }
 
 type effectiveHandlerRoute struct {
@@ -647,7 +659,7 @@ type effectiveHandlerRoute struct {
 
 func newConfigHandler(config proxyConfig, routes []effectiveRoute, logger *logutil.Logger) (*configHandler, error) {
 	endpoint := "http://" + config.Listen + "/v1"
-	h := &configHandler{routes: make(map[string]effectiveHandlerRoute, len(routes)), models: routes, endpoint: endpoint, config: config, logger: logger, status: seedListingStatus(config)}
+	h := &configHandler{routes: make(map[string]effectiveHandlerRoute, len(routes)), models: routes, endpoint: endpoint, config: config, logger: logger, status: seedListingStatus(config), startedAt: time.Now(), wake: make(chan struct{}, 1)}
 	for _, route := range routes {
 		handler, err := buildProviderHandler(route, endpoint, logger)
 		if err != nil {
@@ -819,6 +831,9 @@ func buildProviderProtocolHandler(route effectiveRoute, endpoint string, logger 
 }
 
 func (h *configHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h.serveAdmin(w, r) {
+		return
+	}
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
 		h.serveModels(w, r)
 		return
