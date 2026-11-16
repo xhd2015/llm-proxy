@@ -55,21 +55,57 @@ func TestParseHTTPProxyCatalog(t *testing.T) {
 	if len(catalog.Models) != 2 || catalog.Models[0].ID != "route--model" {
 		t.Fatalf("models = %+v", catalog.Models)
 	}
-	reasoning, err := httpProxyModelReasoning(catalog.Models[0])
-	if err != nil || reasoning.DefaultEffort != "high" || *reasoning.EffortsMapping["low"] != "low" {
-		t.Fatalf("reasoning = %+v, %v", reasoning, err)
+	reasoning := httpProxyModelReasoning(catalog.Models[0])
+	if reasoning == nil || reasoning.DefaultEffort != "high" || *reasoning.EffortsMapping["low"] != "low" {
+		t.Fatalf("reasoning = %+v", reasoning)
 	}
 	if len(catalog.Notes) != 2 {
 		t.Fatalf("notes = %v", catalog.Notes)
 	}
-	for _, body := range []string{`{}`, `{"data":[]}`, `[]`, `{"data":null}`, `{"data":[{"id":1}]}`, `{"data":[{"id":" padded "}]}`,
+	for _, body := range []string{`{}`, `{"data":[]}`, `[]`, `{"data":null}`, `{"data":[{"id":1}]}`, `{"data":[{"id":" padded "}]}`} {
+		if _, err := parseHTTPProxyCatalog([]byte(body)); err == nil {
+			t.Errorf("accepted %s", body)
+		}
+	}
+	for _, body := range []string{
 		`{"data":[{"id":"m","reasoning_efforts":["invented"]}]}`,
 		`{"data":[{"id":"m","reasoning_efforts":["low"],"default_reasoning_effort":"high"}]}`,
 		`{"data":[{"id":"m","reasoning_efforts":["low","low"]}]}`,
 	} {
-		if _, err := parseHTTPProxyCatalog([]byte(body)); err == nil {
-			t.Errorf("accepted %s", body)
+		if _, err := parseHTTPProxyCatalog([]byte(body)); err != nil {
+			t.Errorf("unknown or duplicate efforts must not fail the catalog: %s: %v", body, err)
 		}
+	}
+}
+
+func TestHTTPProxyModelReasoningIgnoresUnknownEfforts(t *testing.T) {
+	kept := httpProxyModelReasoning(httpProxyModelEntry{
+		ID: "flash", ReasoningEfforts: []string{"low", "high", "none"}, DefaultReasoningEffort: "high",
+	})
+	if kept == nil || kept.DefaultEffort != "high" || kept.EffortsMapping["none"] != nil || kept.EffortsMapping["low"] == nil || kept.EffortsMapping["high"] == nil {
+		t.Fatalf("kept = %+v", kept)
+	}
+	terra := httpProxyModelReasoning(httpProxyModelEntry{
+		ID: "gpt-6.1-terra", ReasoningEfforts: []string{"low", "medium", "high", "xhigh", "max", "none"}, DefaultReasoningEffort: "medium",
+	})
+	if terra == nil || terra.DefaultEffort != "medium" || terra.EffortsMapping["none"] != nil || len(terra.EffortsMapping) != 5 {
+		t.Fatalf("terra = %+v", terra)
+	}
+	if got := httpProxyModelReasoning(httpProxyModelEntry{
+		ID: "off", ReasoningEfforts: []string{"none"}, DefaultReasoningEffort: "none",
+	}); got != nil {
+		t.Fatalf("none-only = %+v", got)
+	}
+	dup := httpProxyModelReasoning(httpProxyModelEntry{
+		ID: "dup", ReasoningEfforts: []string{"low", "low"}, DefaultReasoningEffort: "low",
+	})
+	if dup == nil || dup.DefaultEffort != "low" || len(dup.EffortsMapping) != 1 {
+		t.Fatalf("dup = %+v", dup)
+	}
+	if got := httpProxyModelReasoning(httpProxyModelEntry{
+		ID: "mismatch", ReasoningEfforts: []string{"low", "high"}, DefaultReasoningEffort: "none",
+	}); got != nil {
+		t.Fatalf("unknown default = %+v", got)
 	}
 }
 
@@ -77,9 +113,8 @@ func TestHTTPProxyIncompleteReasoningNeverInventsDefaults(t *testing.T) {
 	for _, entry := range []httpProxyModelEntry{
 		{ID: "a"}, {ID: "b", ReasoningEfforts: []string{"low", "high"}}, {ID: "c", DefaultReasoningEffort: "high"},
 	} {
-		reasoning, err := httpProxyModelReasoning(entry)
-		if err != nil || reasoning != nil {
-			t.Fatalf("entry=%+v, reasoning=%+v err=%v", entry, reasoning, err)
+		if reasoning := httpProxyModelReasoning(entry); reasoning != nil {
+			t.Fatalf("entry=%+v, reasoning=%+v", entry, reasoning)
 		}
 	}
 }
@@ -337,6 +372,36 @@ func TestCatalogProbeReturnsGenericRow(t *testing.T) {
 		if got.Code != tc.status {
 			t.Fatalf("%s: %d %s", tc.name, got.Code, got.Body.String())
 		}
+	}
+}
+
+func TestHTTPProxyListingSurvivesUnsupportedEffort(t *testing.T) {
+	resetHTTPProxyCache(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"data":[
+			{"id":"deepseek-v4.1-flash-1017","reasoning_efforts":["low","high","max"],"default_reasoning_effort":"high"},
+			{"id":"gpt-6.1-terra","reasoning_efforts":["low","medium","high","xhigh","max","none"],"default_reasoning_effort":"medium"}
+		]}`)
+	}))
+	defer server.Close()
+	entries, _, err := fetchHTTPListing(context.Background(), httpProxyTestDoc(server.URL).Providers[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries=%d", len(entries))
+	}
+	byID := map[string]listingEntry{}
+	for _, entry := range entries {
+		byID[entry.ID] = entry
+	}
+	flash := byID["deepseek-v4.1-flash-1017"].Reasoning
+	if flash == nil || flash.DefaultEffort != "high" {
+		t.Fatalf("1017=%+v", byID["deepseek-v4.1-flash-1017"])
+	}
+	terra := byID["gpt-6.1-terra"].Reasoning
+	if terra == nil || terra.DefaultEffort != "medium" || terra.EffortsMapping["none"] != nil || len(terra.EffortsMapping) != 5 {
+		t.Fatalf("terra=%+v", terra)
 	}
 }
 

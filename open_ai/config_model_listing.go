@@ -409,11 +409,7 @@ func fetchHTTPListing(ctx context.Context, provider configProvider) ([]listingEn
 		if tokens := firstPositive(model.MaxOutputTokens, model.MaxTokens); tokens > 0 {
 			entry.MaxTokens = &tokens
 		}
-		reasoning, err := httpProxyModelReasoning(model)
-		if err != nil {
-			return nil, endpoint, err
-		}
-		entry.Reasoning = reasoning
+		entry.Reasoning = httpProxyModelReasoning(model)
 		entries = append(entries, entry)
 	}
 	return entries, endpoint, nil

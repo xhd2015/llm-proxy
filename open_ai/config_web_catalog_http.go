@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -155,11 +156,6 @@ func fetchHTTPProxyCatalog(ctx context.Context, target httpProxyEndpoint) (httpP
 	if err != nil {
 		return httpProxyCachedCatalog{}, err
 	}
-	for _, model := range cat.Models {
-		if _, err := httpProxyModelReasoning(model); err != nil {
-			return httpProxyCachedCatalog{}, err
-		}
-	}
 	return httpProxyCachedCatalog{FetchedAt: cat.FetchedAt, Models: cat.Models, Notes: cat.Notes, Auth: cat.Auth}, nil
 }
 
@@ -179,42 +175,41 @@ func parseHTTPProxyCatalog(body []byte) (httpProxyCachedCatalog, error) {
 	if err != nil {
 		return httpProxyCachedCatalog{}, err
 	}
-	// Preserve proxy-specific validation. Generic discovery accepts new upstream
-	// vocabulary; individual clients must filter their own supported efforts.
-	for _, model := range cat.Models {
-		if _, err := httpProxyModelReasoning(model); err != nil {
-			return httpProxyCachedCatalog{}, err
-		}
-	}
 	return httpProxyCachedCatalog{FetchedAt: cat.FetchedAt, Models: cat.Models, Notes: cat.Notes, Auth: cat.Auth}, nil
 }
 
-func httpProxyModelReasoning(model httpProxyModelEntry) (*configReasoning, error) {
+// httpProxyModelReasoning keeps only efforts this proxy can serve. Unknown
+// upstream tokens are dropped with a warning; a catalog must not fail because
+// one model advertised vocabulary a client will filter anyway.
+func httpProxyModelReasoning(model httpProxyModelEntry) *configReasoning {
 	mapping := map[string]*string{}
 	for _, effort := range model.ReasoningEfforts {
 		if !validReasoningEffort(effort) {
-			return nil, fmt.Errorf("model %q advertises unsupported reasoning effort %q", model.ID, effort)
+			log.Printf("warning: model %q: ignored unsupported reasoning effort %q", model.ID, effort)
+			continue
 		}
 		if _, exists := mapping[effort]; exists {
-			return nil, fmt.Errorf("model %q repeats reasoning effort %q", model.ID, effort)
+			log.Printf("warning: model %q: ignored duplicate reasoning effort %q", model.ID, effort)
+			continue
 		}
 		value := effort
 		mapping[effort] = &value
 	}
-	if model.DefaultReasoningEffort != "" {
-		if !validReasoningEffort(model.DefaultReasoningEffort) {
-			return nil, fmt.Errorf("model %q advertises an unsupported default reasoning effort", model.ID)
-		}
-		if len(mapping) > 0 {
-			if _, ok := mapping[model.DefaultReasoningEffort]; !ok {
-				return nil, fmt.Errorf("model %q default reasoning effort is not in reasoning_efforts", model.ID)
-			}
+	defaultEffort := model.DefaultReasoningEffort
+	if defaultEffort != "" && !validReasoningEffort(defaultEffort) {
+		log.Printf("warning: model %q: ignored unsupported default reasoning effort %q", model.ID, defaultEffort)
+		return nil
+	}
+	if defaultEffort != "" && len(mapping) > 0 {
+		if _, ok := mapping[defaultEffort]; !ok {
+			log.Printf("warning: model %q: default reasoning effort %q is not in reasoning_efforts; disabling reasoning", model.ID, defaultEffort)
+			return nil
 		}
 	}
-	if len(mapping) == 0 || model.DefaultReasoningEffort == "" {
-		return nil, nil
+	if len(mapping) == 0 || defaultEffort == "" {
+		return nil
 	}
-	return &configReasoning{DefaultEffort: model.DefaultReasoningEffort, EffortsMapping: mapping}, nil
+	return &configReasoning{DefaultEffort: defaultEffort, EffortsMapping: mapping}
 }
 
 func proxyCatalogProvider(doc proxyConfig, name string) (configProvider, error) {

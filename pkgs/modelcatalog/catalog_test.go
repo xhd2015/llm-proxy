@@ -32,9 +32,18 @@ func TestDirectoryDiscoveryPreservesIdentityAndNeverInfersCapability(t *testing.
 			t.Fatalf("invented capability: %+v", r)
 		}
 	}
-	for _, body := range []string{`{}`, `{"data":[]}`, `{"data":[{"id":" x "}]}`, `{"data":[{"id":"x","reasoning_efforts":["low","low"]}]}`, `{"data":[{"id":"x","reasoning_efforts":["low"],"default_reasoning_effort":"high"}]}`, `{"data":[{"id":"x","reasoning_efforts":1}]}`} {
+	for _, body := range []string{`{}`, `{"data":[]}`, `{"data":[{"id":" x "}]}`, `{"data":[{"id":"x","reasoning_efforts":1}]}`} {
 		if _, err := modelcatalog.Parse([]byte(body)); err == nil {
 			t.Errorf("accepted invalid metadata: %s", body)
+		}
+	}
+	for _, body := range []string{
+		`{"data":[{"id":"x","reasoning_efforts":["low","low"]}]}`,
+		`{"data":[{"id":"x","reasoning_efforts":["low"],"default_reasoning_effort":"high"}]}`,
+		`{"data":[{"id":"x","reasoning_efforts":["low","none"],"default_reasoning_effort":"low"}]}`,
+	} {
+		if _, err := modelcatalog.Parse([]byte(body)); err != nil {
+			t.Errorf("shape-only extras must not fail the catalog: %s: %v", body, err)
 		}
 	}
 }

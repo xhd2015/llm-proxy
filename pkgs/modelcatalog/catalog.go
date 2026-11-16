@@ -48,23 +48,17 @@ func (m Model) Reasoning() Reasoning {
 
 // ValidateReasoning checks shape, not a particular client's fixed vocabulary.
 // A gateway may add values which an individual client must subsequently filter.
+// Duplicate efforts and a default missing from the list are not fatal: callers
+// drop or disable them. Empty or control-character tokens still fail the body.
 func ValidateReasoning(m Model) error {
-	seen := map[string]bool{}
 	for _, e := range m.ReasoningEfforts {
 		if e == "" || strings.TrimSpace(e) != e || strings.ContainsAny(e, "\r\n\x00") {
 			return fmt.Errorf("model %q has invalid reasoning metadata", m.ID)
 		}
-		if seen[e] {
-			return fmt.Errorf("model %q repeats reasoning effort %q", m.ID, e)
-		}
-		seen[e] = true
 	}
 	if e := m.DefaultReasoningEffort; e != "" {
 		if strings.TrimSpace(e) != e || strings.ContainsAny(e, "\r\n\x00") {
 			return fmt.Errorf("model %q has invalid default reasoning metadata", m.ID)
-		}
-		if len(seen) > 0 && !seen[e] {
-			return fmt.Errorf("model %q default reasoning effort is not in reasoning_efforts", m.ID)
 		}
 	}
 	return nil

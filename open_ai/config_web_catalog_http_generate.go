@@ -16,10 +16,7 @@ func generateHTTPProxyModels(provider, protocol string, entries []httpProxyModel
 	}
 	objects := make([]catalogModelObject, 0, len(entries))
 	for _, entry := range entries {
-		reasoning, err := httpProxyModelReasoning(entry)
-		if err != nil {
-			return nil, err
-		}
+		reasoning := httpProxyModelReasoning(entry)
 		var reasoningValue any = map[string]any{"disabled": true}
 		if reasoning != nil {
 			reasoningValue = *reasoning
@@ -29,7 +26,9 @@ func generateHTTPProxyModels(provider, protocol string, entries []httpProxyModel
 			"providerModelName": entry.ID, "clientModelName": provider + "/" + entry.ID,
 			// Missing modality metadata uses the proxy's text + image default;
 			// this is local policy, not a claim that inference was verified.
-			"displayName": entry.ID, "inputs": []configInput{{Type: "text"}, {Type: "image"}},
+			// displayName is omitted so the listing label falls back to the
+			// prefixed clientModelName instead of hiding the provider.
+			"inputs":    []configInput{{Type: "text"}, {Type: "image"}},
 			"reasoning": reasoningValue,
 		}))
 	}

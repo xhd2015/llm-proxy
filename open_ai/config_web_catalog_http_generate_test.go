@@ -117,7 +117,7 @@ func TestHTTPProxyPureGenerationFixedTemplateAndNoMetadataInheritance(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"protocol", "provider", "providerModelName", "clientModelName", "displayName", "reasoning", "inputs"}
+	want := []string{"protocol", "provider", "providerModelName", "clientModelName", "reasoning", "inputs"}
 	for i, object := range objects {
 		if strings.Join(object.keys, ",") != strings.Join(want, ",") {
 			t.Fatalf("field order: %v", object.keys)
@@ -135,9 +135,30 @@ func TestHTTPProxyPureGenerationFixedTemplateAndNoMetadataInheritance(t *testing
 		if model.ProviderModelName != []string{"z", "a"}[i] {
 			t.Fatal("sorted upstream list")
 		}
+		if model.DisplayName != "" {
+			t.Fatalf("identity displayName leaked: %q", model.DisplayName)
+		}
 	}
+	original := objects
+	objects, err = generateHTTPProxyModels("gateway", "openai-responses", []httpProxyModelEntry{
+		{ID: "gpt-6.1-terra", ReasoningEfforts: []string{"low", "medium", "high", "xhigh", "max", "none"}, DefaultReasoningEffort: "medium"},
+	})
+	if err != nil || len(objects) != 1 {
+		t.Fatalf("unknown effort aborted generation: %v", err)
+	}
+	if objects[0].string("displayName") != "" {
+		t.Fatalf("identity displayName leaked: %s", objects[0].text(""))
+	}
+	var terra configModel
+	if err := json.Unmarshal([]byte(objects[0].text("")), &terra); err != nil {
+		t.Fatal(err)
+	}
+	if terra.Reasoning == nil || terra.Reasoning.DefaultEffort != "medium" || terra.Reasoning.EffortsMapping["none"] != nil {
+		t.Fatalf("terra reasoning=%+v", terra.Reasoning)
+	}
+
 	reversed, err := generateHTTPProxyModels("gateway", "openai-responses", []httpProxyModelEntry{{ID: "a"}, {ID: "z"}})
-	if err != nil || reversed[0].string("providerModelName") != "a" || catalogFragmentText(objects) == catalogFragmentText(reversed) {
+	if err != nil || reversed[0].string("providerModelName") != "a" || catalogFragmentText(original) == catalogFragmentText(reversed) {
 		t.Fatalf("ignored upstream order: %v", err)
 	}
 }
