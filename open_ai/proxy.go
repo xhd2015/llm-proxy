@@ -44,6 +44,7 @@ type proxyOptions struct {
 	staticAuthorization         string
 	authorizationFile           string
 	modelCapabilities           map[string]ModelCapability
+	providerName                string
 }
 
 func newProxyWithOptions(target *url.URL, modelMap map[string]string, verbose bool, opts proxyOptions) *httputil.ReverseProxy {
@@ -76,6 +77,10 @@ func newProxyWithOptions(target *url.URL, modelMap map[string]string, verbose bo
 		authorizationFile:       opts.authorizationFile,
 		modelCapabilities:       opts.modelCapabilities,
 		verbose:                 verbose,
+	}
+	proxy.ErrorHandler = func(rw http.ResponseWriter, _ *http.Request, err error) {
+		log.Printf("http: proxy error: %v", err)
+		writeProxyTransportError(rw, opts.providerName, target, err)
 	}
 
 	return proxy
@@ -381,6 +386,10 @@ func (c *loggingTransport) handleErrorResponse(resp *http.Response) (*http.Respo
 	if err != nil {
 		c.logf("Error reading response body: %v", err)
 		return nil, err
+	}
+	if len(bytes.TrimSpace(body)) == 0 && resp.StatusCode >= 400 {
+		body = emptyUpstreamErrorJSON(resp)
+		resp.Header.Set("Content-Type", "application/json")
 	}
 	c.logf("Error Response body: %s", string(body))
 	replaceBody(resp, body)

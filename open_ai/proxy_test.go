@@ -3,9 +3,11 @@ package openai
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -471,5 +474,117 @@ func TestHandleNonStreamingResponseFiltersGrokCLIKeepalives(t *testing.T) {
 	}
 	if contentType := got.Header.Get("Content-Type"); contentType != "text/event-stream" {
 		t.Fatalf("Content-Type = %q, want text/event-stream", contentType)
+	}
+}
+
+func TestClassifyProxyError(t *testing.T) {
+	target, err := url.Parse("http://127.0.0.1:15721/agent/openai/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, code, message := classifyProxyError("ais-openai", target, &url.Error{Op: "Get", URL: target.String(), Err: &net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}})
+	if status != http.StatusBadGateway || code != "upstream_unreachable" {
+		t.Fatalf("refused: %d %s %s", status, code, message)
+	}
+	if !strings.Contains(message, "ais-openai") || !strings.Contains(message, "127.0.0.1:15721") || !strings.Contains(message, "nothing is listening") {
+		t.Fatalf("refused message = %q", message)
+	}
+	if strings.Contains(strings.ToLower(message), "ais switch") {
+		t.Fatalf("message names a specific app: %q", message)
+	}
+	status, code, message = classifyProxyError("ais-openai", target, context.DeadlineExceeded)
+	if status != http.StatusGatewayTimeout || code != "upstream_timeout" {
+		t.Fatalf("timeout: %d %s %s", status, code, message)
+	}
+	status, code, _ = classifyProxyError("", target, syscall.ECONNRESET)
+	if status != http.StatusBadGateway || code != "upstream_reset" {
+		t.Fatalf("reset: %d %s", status, code)
+	}
+	status, code, _ = classifyProxyError("", target, &net.DNSError{Err: "no such host", Name: "missing.invalid"})
+	if status != http.StatusBadGateway || code != "upstream_dns" {
+		t.Fatalf("dns: %d %s", status, code)
+	}
+}
+
+func TestProxyDialRefusedWritesJSONBody(t *testing.T) {
+	target, err := url.Parse("http://127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := newProxyWithOptions(target, nil, false, proxyOptions{providerName: "ais-openai"})
+	req := httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/responses", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	proxy.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var payload struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+			Code    string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("body %q: %v", rec.Body.String(), err)
+	}
+	if payload.Error.Type != "proxy_error" || payload.Error.Code != "upstream_unreachable" {
+		t.Fatalf("error = %+v", payload.Error)
+	}
+	if !strings.Contains(payload.Error.Message, "ais-openai") || !strings.Contains(payload.Error.Message, "127.0.0.1:1") {
+		t.Fatalf("message = %q", payload.Error.Message)
+	}
+}
+
+func TestProxyEmptyUpstreamErrorGetsJSONBody(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer upstream.Close()
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := newProxyWithOptions(target, nil, false, proxyOptions{})
+	req := httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/responses", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	proxy.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var payload struct {
+		Error struct {
+			Message string `json:"message"`
+			Code    string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("body %q: %v", rec.Body.String(), err)
+	}
+	if payload.Error.Code != "upstream_empty_error" || !strings.Contains(payload.Error.Message, "empty body") {
+		t.Fatalf("error = %+v", payload.Error)
+	}
+}
+
+func TestProxyForwardsUpstreamErrorBody(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"weekly limit","code":"RATE_LIMITED"}}`))
+	}))
+	defer upstream.Close()
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := newProxyWithOptions(target, nil, false, proxyOptions{})
+	req := httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/responses", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	proxy.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "weekly limit") {
+		t.Fatalf("body = %q", rec.Body.String())
 	}
 }

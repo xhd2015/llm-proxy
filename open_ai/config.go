@@ -819,14 +819,14 @@ func buildProviderProtocolHandler(route effectiveRoute, endpoint string, logger 
 		if err != nil {
 			return nil, err
 		}
-		proxy := newProxyWithOptions(target, map[string]string{route.clientModelName: route.providerModelName}, false, proxyOptions{stripPathPrefix: "/v1", disableWebSocketCompression: true, fullLogger: logger, logWebSocketMessages: true, codexTransform: true, feedToGrokCLI: route.feedToGrokCli, codexAuthFile: provider.AuthFile})
+		proxy := newProxyWithOptions(target, map[string]string{route.clientModelName: route.providerModelName}, false, proxyOptions{stripPathPrefix: "/v1", disableWebSocketCompression: true, fullLogger: logger, logWebSocketMessages: true, codexTransform: true, feedToGrokCLI: route.feedToGrokCli, codexAuthFile: provider.AuthFile, providerName: provider.Name})
 		return newCodexProxyHandler(proxy, route.feedToGrokCli, codexModelsCachePath(), endpoint), nil
 	case "http-proxy":
 		target, err := url.Parse(provider.BaseURL)
 		if err != nil {
 			return nil, err
 		}
-		return newProxyWithOptions(target, map[string]string{route.clientModelName: route.providerModelName}, false, proxyOptions{stripPathPrefix: "/v1", fullLogger: logger, staticAuthorization: httpProxyStaticToken(provider), authorizationFile: provider.TokenFile}), nil
+		return newProxyWithOptions(target, map[string]string{route.clientModelName: route.providerModelName}, false, proxyOptions{stripPathPrefix: "/v1", fullLogger: logger, staticAuthorization: httpProxyStaticToken(provider), authorizationFile: provider.TokenFile, providerName: provider.Name}), nil
 	case "grok":
 		return grokapi.NewHandler(grokapi.HandlerOpts{Home: provider.Home, BaseURL: provider.BaseURL, Endpoint: endpoint, Logf: logger.Printf})
 	default:
