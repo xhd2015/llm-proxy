@@ -41,6 +41,13 @@ func (m *mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 
 func TestApplySessionHeaderCopiesFirstSource(t *testing.T) {
 	header := http.Header{}
+	header.Set("x-dsh-session-id", "dsh-session")
+	header.Set("Session_id", "codex-session")
+	applySessionHeader(header, "x-opencode-session", nil)
+	if got := header.Get("x-opencode-session"); got != "dsh-session" {
+		t.Fatalf("session header = %q, want DSH id over Codex", got)
+	}
+	header = http.Header{}
 	header.Set("Session_id", "codex-session")
 	applySessionHeader(header, "x-opencode-session", nil)
 	if got := header.Get("x-opencode-session"); got != "codex-session" {
@@ -68,13 +75,15 @@ func TestProxySessionHeaderPassThroughAndRemap(t *testing.T) {
 	}
 	proxy := newProxyWithOptions(target, nil, false, proxyOptions{stripPathPrefix: "/v1", sessionHeader: "x-opencode-session"})
 	req := httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/responses", strings.NewReader(`{"model":"m"}`))
+	req.Header.Set("x-agent-runner", "dsh")
+	req.Header.Set("x-dsh-session-id", "from-dsh")
 	req.Header.Set("Session_id", "from-codex")
 	rec := httptest.NewRecorder()
 	proxy.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
 	}
-	if gotSession != "from-codex" || gotFrom != "from-codex" {
+	if gotSession != "from-dsh" || gotFrom != "from-codex" {
 		t.Fatalf("x-opencode-session=%q Session_id=%q", gotSession, gotFrom)
 	}
 }

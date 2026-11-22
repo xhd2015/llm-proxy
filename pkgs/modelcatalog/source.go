@@ -45,8 +45,8 @@ type Provider struct {
 	ModelListMode   string `json:"modelListMode,omitempty"`
 	// SessionHeader is the upstream header that should carry a conversation
 	// id (for example OpenCode Go's x-opencode-session). When set, the proxy
-	// copies the first nonempty incoming header from SessionHeaderSources,
-	// or from SessionHeader itself, onto that name. It does not invent an id.
+	// copies the first nonempty incoming header from SessionHeaderSources
+	// (default includes x-dsh-session-id) onto that name. It does not invent an id.
 	SessionHeader        string       `json:"sessionHeader,omitempty"`
 	SessionHeaderSources []string     `json:"sessionHeaderSources,omitempty"`
 	Token                string       `json:"token,omitempty"`

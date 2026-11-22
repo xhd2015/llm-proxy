@@ -110,8 +110,10 @@ provider name, hostname, port, or path spelling selects special handling.
 An `http-proxy` provider may set `sessionHeader` to the upstream conversation
 header (OpenCode Go uses `x-opencode-session`). The proxy forwards that header
 when the client already sent it, and otherwise copies the first nonempty value
-from `sessionHeaderSources` (default `X-Session-Id`, `Session_id`,
-`x-request-session`). It does not invent a session id when none arrived.
+from `sessionHeaderSources` (default `x-dsh-session-id`, `X-Session-Id`,
+`Session_id`, `x-request-session`). Clients such as DSH send a generic
+`x-dsh-session-id` plus `x-agent-runner`; the proxy maps only the session id
+onto the provider header. It does not invent a session id when none arrived.
 
 Variants cannot change `protocol` or `providerModelName`. An OpenAI Responses
 route exports to Codex directly; an Anthropic route requires `anthropic2openai`

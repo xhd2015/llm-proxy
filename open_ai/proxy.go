@@ -51,7 +51,7 @@ type proxyOptions struct {
 
 // defaultSessionHeaderSources are copied onto sessionHeader when the client
 // already identified the conversation under a different header name.
-var defaultSessionHeaderSources = []string{"X-Session-Id", "Session_id", "x-request-session"}
+var defaultSessionHeaderSources = []string{"x-dsh-session-id", "X-Session-Id", "Session_id", "x-request-session"}
 
 // applySessionHeader copies a conversation id onto name. Incoming name wins;
 // otherwise the first nonempty source is used. Missing values stay missing.
