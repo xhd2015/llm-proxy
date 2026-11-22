@@ -41,6 +41,9 @@ func (c *Client) Generate(ctx context.Context, body *alphaRequest) (*http.Respon
 	req.Header.Set("User-Agent", "cli")
 	req.Header.Set("X-Command-Code-Version", c.Version)
 	req.Header.Set("X-Cli-Environment", "production")
+	// The same conversation id travels twice: threadId is what the body schema
+	// defines, x-session-id is the header the upstream's cache keys on.
+	req.Header.Set("x-session-id", body.ThreadID)
 
 	client := c.HTTP
 	if client == nil {

@@ -45,6 +45,8 @@ func buildRequest(req *MessagesRequest, effortByModel map[string]map[string]stri
 		return nil, err
 	}
 
+	// The handler replaces this with the id the session registry allocated.
+	// A random default keeps the translator usable on its own.
 	threadID, err := newThreadID()
 	if err != nil {
 		return nil, err

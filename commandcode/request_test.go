@@ -2,12 +2,9 @@ package commandcode
 
 import (
 	"encoding/json"
-	"regexp"
 	"strings"
 	"testing"
 )
-
-var uuidRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 func parseRequest(t *testing.T, body string) *MessagesRequest {
 	t.Helper()

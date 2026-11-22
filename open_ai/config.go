@@ -654,6 +654,9 @@ type configHandler struct {
 	// applyMu serializes config mutations (reload, account switch) so two
 	// concurrent switches cannot interleave their writes or route swaps.
 	applyMu sync.Mutex
+
+	// commandCodePools backs GET /v1/accounts; one shared pool per provider.
+	commandCodePools []*commandcode.AccountPool
 }
 
 type effectiveHandlerRoute struct {
@@ -670,6 +673,21 @@ func newConfigHandler(config proxyConfig, routes []effectiveRoute, logger *logut
 			return nil, fmt.Errorf("build route %q: %w", route.clientModelName, err)
 		}
 		h.routes[route.clientModelName] = effectiveHandlerRoute{route: route, handler: handler}
+	}
+	// Collect the pools after the routes exist: building a commandcode route is
+	// what creates its provider's pool.
+	seenPools := map[*commandcode.AccountPool]bool{}
+	for _, provider := range config.Providers {
+		if provider.Kind != "commandcode" {
+			continue
+		}
+		commandCodePoolMu.Lock()
+		pool := commandCodePools[commandCodePoolKey(provider)]
+		commandCodePoolMu.Unlock()
+		if pool != nil && !seenPools[pool] {
+			seenPools[pool] = true
+			h.commandCodePools = append(h.commandCodePools, pool)
+		}
 	}
 	return h, nil
 }
@@ -798,11 +816,71 @@ func credentialSelectionWarnings(config proxyConfig) []configDiagnostic {
 	return warnings
 }
 
+// commandCodePools are shared per provider: a config with fifteen models must
+// not poll quota fifteen times or count in-flight requests per model.
+var (
+	commandCodePoolMu sync.Mutex
+	commandCodePools  = map[string]*commandcode.AccountPool{}
+)
+
+// commandCodeAccounts maps a provider's credential list to the pool's account
+// list, keeping the config order.
+func commandCodeAccounts(provider modelcatalog.Provider) []commandcode.AccountConfig {
+	accounts := make([]commandcode.AccountConfig, 0, len(provider.Credentials))
+	for _, credential := range provider.Credentials {
+		home := strings.TrimSpace(credential.Home)
+		if home == "" {
+			continue
+		}
+		name := strings.TrimSpace(credential.Name)
+		if name == "" {
+			name = home
+		}
+		accounts = append(accounts, commandcode.AccountConfig{Name: name, Home: home})
+	}
+	if len(accounts) == 0 && strings.TrimSpace(provider.Home) != "" {
+		accounts = append(accounts, commandcode.AccountConfig{Name: "default", Home: provider.Home})
+	}
+	return accounts
+}
+
+func commandCodePoolKey(provider modelcatalog.Provider) string {
+	return provider.Name + "\x00" + provider.BaseURL + "\x00" + provider.Version
+}
+
+// commandCodePoolFor returns the provider's shared pool, building it on first
+// use. An empty account list returns nil so the single-home path still works.
+func commandCodePoolFor(provider modelcatalog.Provider) (*commandcode.AccountPool, error) {
+	accounts := commandCodeAccounts(provider)
+	if len(accounts) == 0 {
+		return nil, nil
+	}
+	key := commandCodePoolKey(provider)
+	commandCodePoolMu.Lock()
+	defer commandCodePoolMu.Unlock()
+	if pool := commandCodePools[key]; pool != nil {
+		return pool, nil
+	}
+	pool, err := commandcode.NewAccountPool(accounts, commandcode.PoolOptions{
+		BaseURL: provider.BaseURL,
+		Version: provider.Version,
+	})
+	if err != nil {
+		return nil, err
+	}
+	commandCodePools[key] = pool
+	return pool, nil
+}
+
 func buildProviderProtocolHandler(route effectiveRoute, endpoint string, logger *logutil.Logger) (http.Handler, error) {
 	provider := route.provider
 	switch provider.Kind {
 	case "commandcode":
-		opts := commandcode.Options{Home: provider.Home, Version: provider.Version, BaseURL: provider.BaseURL, Endpoint: endpoint, Logger: logger}
+		pool, err := commandCodePoolFor(provider)
+		if err != nil {
+			return nil, err
+		}
+		opts := commandcode.Options{Home: provider.Home, Version: provider.Version, BaseURL: provider.BaseURL, Endpoint: endpoint, Logger: logger, Pool: pool}
 		if route.adjustUsageForDSH {
 			opts.AdjustUsageForDSH = map[string]bool{route.providerModelName: true}
 		}
@@ -844,6 +922,10 @@ func (h *configHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/models-v2" {
 		h.serveModelsV2(w, r)
+		return
+	}
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/accounts" {
+		commandcode.ServeAccounts(w, r, h.commandCodePools, 0)
 		return
 	}
 	protocol := protocolForPath(r.URL.Path)

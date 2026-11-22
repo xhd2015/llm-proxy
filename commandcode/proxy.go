@@ -1,7 +1,9 @@
 package commandcode
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -41,6 +43,20 @@ type Options struct {
 	// AdjustUsageForDSH, keyed by client model id, rewrites Anthropic
 	// input_tokens to the uncached miss so DSH cache-hit % is disjoint.
 	AdjustUsageForDSH map[string]bool
+	// Accounts is the credential pool. When empty, Home becomes a single
+	// account so the legacy single-credential flags keep working.
+	Accounts []AccountConfig
+	// Pool injects an already-built pool, so every model route of one provider
+	// shares quotas, in-flight counts, and sessions.
+	Pool *AccountPool
+	// SessionWindow is how many recent turn digests a session remembers.
+	SessionWindow int
+	// SessionTTL drops conversations idle longer than this.
+	SessionTTL time.Duration
+	// LiveSessionFor bounds the sessions the stats endpoint reports.
+	LiveSessionFor time.Duration
+	// RefreshEvery is the quota refresh interval.
+	RefreshEvery time.Duration
 }
 
 // NewHandler validates credentials and returns the Command Code HTTP handler.
@@ -55,9 +71,41 @@ func NewHandler(opts Options) (http.Handler, error) {
 		opts.BaseURL = DefaultBaseURL
 	}
 
+	if opts.BaseURL == "" {
+		opts.BaseURL = DefaultBaseURL
+	}
+	if opts.Version == "" {
+		opts.Version = DefaultVersion
+	}
+
 	// Fail fast on missing credentials rather than on the first client request.
-	if _, err := ReadAuth(opts.Home); err != nil {
-		return nil, err
+	accounts := opts.Accounts
+	if len(accounts) == 0 {
+		if _, err := ReadAuth(opts.Home); err != nil {
+			return nil, err
+		}
+		accounts = []AccountConfig{{Name: "default", Home: opts.Home}}
+	} else {
+		for _, account := range accounts {
+			if _, err := ReadAuth(account.Home); err != nil {
+				return nil, fmt.Errorf("account %s: %w", account.Name, err)
+			}
+		}
+	}
+	pool := opts.Pool
+	if pool == nil {
+		built, err := NewAccountPool(accounts, PoolOptions{
+			BaseURL:       opts.BaseURL,
+			Version:       opts.Version,
+			HTTP:          opts.HTTP,
+			RefreshEvery:  opts.RefreshEvery,
+			SessionWindow: opts.SessionWindow,
+			SessionTTL:    opts.SessionTTL,
+		})
+		if err != nil {
+			return nil, err
+		}
+		pool = built
 	}
 
 	h := &handler{
@@ -67,6 +115,8 @@ func NewHandler(opts Options) (http.Handler, error) {
 			Version: opts.Version,
 			HTTP:    opts.HTTP,
 		},
+		pool:     pool,
+		registry: pool.Registry(),
 		opts:     opts,
 		endpoint: opts.Endpoint,
 	}
@@ -111,7 +161,11 @@ func printSetup(endpoint string) {
 }
 
 type handler struct {
+	// client is the single-credential path used when a handler is built
+	// directly (tests) instead of through NewHandler.
 	client   *Client
+	pool     *AccountPool
+	registry *Registry
 	opts     Options
 	endpoint string
 }
@@ -123,6 +177,7 @@ func (h *handler) routes() *http.ServeMux {
 	mux.HandleFunc("/v1/messages/count_tokens", h.countTokens)
 	mux.HandleFunc("/v1/models-v2", h.modelsV2)
 	mux.HandleFunc("/v1/models", h.models)
+	mux.HandleFunc("/v1/accounts", h.accounts)
 	return mux
 }
 
@@ -234,9 +289,16 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.client.Generate(r.Context(), alphaReq)
+	session := h.bindSession(alphaReq)
+	resp, release, err := h.send(r.Context(), alphaReq, session)
+	defer release()
 	if err != nil {
 		h.logf("Error: %v", err)
+		if errors.Is(err, errNoAccount) {
+			writeAnthropicError(w, http.StatusTooManyRequests, "rate_limit_error",
+				"no commandcode account has capacity right now; wait for a quota window to reset")
+			return
+		}
 		writeAnthropicError(w, http.StatusBadGateway, "api_error", err.Error())
 		return
 	}
@@ -320,4 +382,138 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// errNoAccount reports that every configured credential is out of capacity.
+var errNoAccount = errors.New("no commandcode account has capacity")
+
+// failoverCooldown keeps a rejected account out of rotation long enough for a
+// quota window to move, without waiting for the next hourly refresh.
+const failoverCooldown = time.Minute
+
+// bindSession resolves the conversation fingerprint to a session, so every
+// turn of one conversation carries the same upstream threadId.
+func (h *handler) bindSession(alphaReq *alphaRequest) *Session {
+	if h.registry == nil {
+		return nil
+	}
+	chain := ChainDigests(alphaReq.Params.Model, alphaReq.Params.System, alphaReq.Params.Messages)
+	session, info := h.registry.MatchOrCreate(chain)
+	if session == nil {
+		h.logf("Session: could not allocate an id for %d digests", len(chain))
+		return nil
+	}
+	alphaReq.ThreadID = session.ID
+	switch {
+	case info.Forked && info.Parent != nil:
+		h.logf("Session: fork %s from %s (%d digests matched)", shortID(session.ID), shortID(info.Parent.ID), info.Matched)
+	case info.Created:
+		h.logf("Session: new %s (%d digests)", shortID(session.ID), len(chain))
+	}
+	return session
+}
+
+// send routes one request to an account and returns the response plus the
+// cleanup that ends its in-flight accounting. A quota or entitlement refusal
+// moves the session to another account once; a second failure is reported.
+func (h *handler) send(ctx context.Context, alphaReq *alphaRequest, session *Session) (*http.Response, func(), error) {
+	if h.pool == nil {
+		resp, err := h.client.Generate(ctx, alphaReq)
+		return resp, func() {}, err
+	}
+	preferred := ""
+	if session != nil && h.registry != nil {
+		preferred = h.registry.AccountOf(session.ID)
+	}
+	excluded := map[string]bool{}
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		entry := h.pool.Select(preferred, excluded)
+		if entry == nil {
+			break
+		}
+		if !h.pool.Acquire(entry.name) {
+			excluded[entry.name] = true
+			continue
+		}
+		if session != nil && h.registry != nil {
+			h.registry.Acquire(session.ID)
+			h.registry.SetAccount(session.ID, entry.name)
+			alphaReq.ThreadID = session.ID
+		}
+		resp, err := entry.Client().Generate(ctx, alphaReq)
+		if err == nil && !needsFailover(resp.StatusCode) {
+			h.logf("Route: session=%s account=%s attempt=%d", shortID(sessionID(session)), entry.name, attempt+1)
+			account := entry.name
+			released := false
+			cleanup := func() {
+				if released {
+					return
+				}
+				released = true
+				h.pool.Release(account)
+				if session != nil && h.registry != nil {
+					h.registry.Release(session.ID)
+				}
+			}
+			return resp, cleanup, nil
+		}
+
+		// The attempt failed: give the slot back before deciding what next.
+		h.pool.Release(entry.name)
+		if session != nil && h.registry != nil {
+			h.registry.Release(session.ID)
+		}
+		excluded[entry.name] = true
+		if err != nil {
+			lastErr = err
+		} else {
+			reason := fmt.Sprintf("upstream %d", resp.StatusCode)
+			h.pool.Cooldown(entry.name, reason, failoverCooldown)
+			h.logf("Failover: session=%s account=%s %s", shortID(sessionID(session)), entry.name, reason)
+		}
+
+		// One retry, and only when another account can take the request.
+		if attempt >= 1 || h.pool.Select(preferred, excluded) == nil {
+			if err != nil {
+				return nil, func() {}, err
+			}
+			return resp, func() {}, nil
+		}
+		if resp != nil {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+			_ = resp.Body.Close()
+			resp = nil
+		}
+	}
+	if lastErr != nil {
+		return nil, func() {}, lastErr
+	}
+	return nil, func() {}, errNoAccount
+}
+
+// needsFailover reports statuses that mean "this account cannot serve right
+// now", as opposed to a content-level refusal.
+func needsFailover(status int) bool {
+	switch status {
+	case http.StatusTooManyRequests, http.StatusForbidden, http.StatusBadGateway, http.StatusServiceUnavailable:
+		return true
+	default:
+		return false
+	}
+}
+
+func sessionID(session *Session) string {
+	if session == nil {
+		return ""
+	}
+	return session.ID
+}
+
+// shortID trims a UUID for a log line.
+func shortID(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
 }
