@@ -242,3 +242,149 @@ func TestPoolClientIsPerAccount(t *testing.T) {
 		t.Fatalf("client home = %q", first.Client().Home)
 	}
 }
+
+func TestPoolConfigureReconcilesAccounts(t *testing.T) {
+	fetcher := &fakeFetcher{snapshots: map[string]*CreditSnapshot{
+		"/h/a": {Weekly: WindowUsage{Used: 13, Cap: 35}},
+		"/h/b": {Weekly: WindowUsage{Used: 30, Cap: 35}},
+	}}
+	pool := newTestPool(t, fetcher, nil)
+	pool.Refresh(context.Background())
+	pool.Acquire("a")
+
+	// b disappears, c appears, a's cap changes.
+	pool.Configure([]AccountConfig{
+		{Name: "a", Home: "/h/a", MaxInFlight: 2},
+		{Name: "c", Home: "/h/c"},
+	}, PoolSettings{LoadBalance: true})
+
+	stats := pool.Snapshot()
+	if len(stats) != 2 {
+		t.Fatalf("accounts = %d, want 2: %+v", len(stats), stats)
+	}
+	byName := map[string]AccountStat{}
+	for _, stat := range stats {
+		byName[stat.Name] = stat
+	}
+	if _, ok := byName["b"]; ok {
+		t.Fatal("removed account still listed")
+	}
+	if byName["a"].InFlight != 1 {
+		t.Fatalf("survivor lost its in-flight count: %+v", byName["a"])
+	}
+	if byName["a"].Weekly.Used != 13 {
+		t.Fatalf("survivor lost its quota: %+v", byName["a"])
+	}
+	if byName["a"].MaxInFlight != 2 {
+		t.Fatalf("cap not applied: %+v", byName["a"])
+	}
+	if !byName["c"].Available {
+		t.Fatalf("new account should start available: %+v", byName["c"])
+	}
+}
+
+func TestPoolConfigureKeepsSessionBindings(t *testing.T) {
+	pool := newTestPool(t, &fakeFetcher{}, nil)
+	session, _ := pool.Registry().MatchOrCreate(chainOf("hello"))
+	pool.Registry().SetAccount(session.ID, "a")
+
+	pool.Configure([]AccountConfig{
+		{Name: "a", Home: "/h/a"},
+		{Name: "b", Home: "/h/b"},
+	}, PoolSettings{LoadBalance: true})
+
+	if account := pool.Registry().AccountOf(session.ID); account != "a" {
+		t.Fatalf("session binding lost across Configure: %q", account)
+	}
+	// And the session survives a later match.
+	again, info := pool.Registry().MatchOrCreate(chainOf("hello", "next"))
+	if again.ID != session.ID || info.Created {
+		t.Fatalf("session was recreated across Configure: %+v", info)
+	}
+}
+
+func TestPoolMaxInFlightCapsConcurrency(t *testing.T) {
+	pool := newTestPool(t, &fakeFetcher{}, nil)
+	pool.Configure([]AccountConfig{{Name: "a", Home: "/h/a", MaxInFlight: 1}}, PoolSettings{LoadBalance: true})
+
+	if !pool.Acquire("a") {
+		t.Fatal("first slot refused")
+	}
+	if pool.Acquire("a") {
+		t.Fatal("second slot granted past the cap")
+	}
+	pool.Release("a")
+	if !pool.Acquire("a") {
+		t.Fatal("slot not reusable after release")
+	}
+}
+
+func TestPoolAcquireSlotWaitsThenFails(t *testing.T) {
+	pool, err := NewAccountPool([]AccountConfig{{Name: "a", Home: "/h/a", MaxInFlight: 1}}, PoolOptions{
+		BaseURL:        "http://127.0.0.1:1",
+		DisableRefresh: true,
+		Fetch:          (&fakeFetcher{}).Fetch,
+		WaitForSlot:    120 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if !pool.Acquire("a") {
+		t.Fatal("failed to fill the only slot")
+	}
+
+	start := time.Now()
+	if entry := pool.AcquireSlot(context.Background(), "", nil); entry != nil {
+		t.Fatalf("got an account despite a full pool: %+v", entry)
+	}
+	if elapsed := time.Since(start); elapsed < 100*time.Millisecond {
+		t.Fatalf("returned after %s, want it to wait for the slot timeout", elapsed)
+	}
+
+	pool.Release("a")
+	if entry := pool.AcquireSlot(context.Background(), "", nil); entry == nil {
+		t.Fatal("a free slot was not taken")
+	}
+}
+
+func TestPoolLoadBalanceOffUsesSelectedOnly(t *testing.T) {
+	fetcher := &fakeFetcher{snapshots: map[string]*CreditSnapshot{
+		"/h/a": {Weekly: WindowUsage{Used: 0, Cap: 35}},
+		"/h/b": {Weekly: WindowUsage{Used: 30, Cap: 35}},
+	}}
+	pool := newTestPool(t, fetcher, nil)
+	pool.Refresh(context.Background())
+	pool.Configure(testAccounts(), PoolSettings{LoadBalance: false, Selected: "b"})
+
+	if name, ok := pool.RouteName("", nil); !ok || name != "b" {
+		t.Fatalf("routed to %q (ok=%v), want the selected account b", name, ok)
+	}
+	// A disabled selected account leaves nothing routable when balancing is off.
+	pool.Configure([]AccountConfig{
+		{Name: "a", Home: "/h/a"},
+		{Name: "b", Home: "/h/b", Disabled: true},
+	}, PoolSettings{LoadBalance: false, Selected: "b"})
+	if name, ok := pool.RouteName("", nil); ok {
+		t.Fatalf("disabled selected account was routed to: %q", name)
+	}
+}
+
+func TestPoolConfigureTogglesLoadBalance(t *testing.T) {
+	fetcher := &fakeFetcher{snapshots: map[string]*CreditSnapshot{
+		"/h/a": {Weekly: WindowUsage{Used: 0, Cap: 35}},
+		"/h/b": {Weekly: WindowUsage{Used: 30, Cap: 35}},
+	}}
+	pool := newTestPool(t, fetcher, nil)
+	pool.Refresh(context.Background())
+
+	// Balancing on: the emptier account wins.
+	if name, _ := pool.RouteName("", nil); name != "a" {
+		t.Fatalf("balanced route = %q, want a", name)
+	}
+	// Balancing off: the selected account serves even though it is busier.
+	pool.Configure(testAccounts(), PoolSettings{LoadBalance: false, Selected: "b"})
+	if name, _ := pool.RouteName("", nil); name != "b" {
+		t.Fatalf("unbalanced route = %q, want b", name)
+	}
+}

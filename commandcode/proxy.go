@@ -296,7 +296,7 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request) {
 		h.logf("Error: %v", err)
 		if errors.Is(err, errNoAccount) {
 			writeAnthropicError(w, http.StatusTooManyRequests, "rate_limit_error",
-				"no commandcode account has capacity right now; wait for a quota window to reset")
+				"no commandcode account has capacity right now (quota exhausted or concurrency limit reached); retry shortly")
 			return
 		}
 		writeAnthropicError(w, http.StatusBadGateway, "api_error", err.Error())
@@ -426,15 +426,17 @@ func (h *handler) send(ctx context.Context, alphaReq *alphaRequest, session *Ses
 		preferred = h.registry.AccountOf(session.ID)
 	}
 	excluded := map[string]bool{}
+	attempts := 2
+	if !h.pool.LoadBalance() {
+		// Load balancing off means one chosen account; there is nowhere to fail
+		// over to.
+		attempts = 1
+	}
 	var lastErr error
-	for attempt := 0; attempt < 2; attempt++ {
-		entry := h.pool.Select(preferred, excluded)
+	for attempt := 0; attempt < attempts; attempt++ {
+		entry := h.pool.AcquireSlot(ctx, preferred, excluded)
 		if entry == nil {
 			break
-		}
-		if !h.pool.Acquire(entry.name) {
-			excluded[entry.name] = true
-			continue
 		}
 		if session != nil && h.registry != nil {
 			h.registry.Acquire(session.ID)
@@ -474,7 +476,7 @@ func (h *handler) send(ctx context.Context, alphaReq *alphaRequest, session *Ses
 		}
 
 		// One retry, and only when another account can take the request.
-		if attempt >= 1 || h.pool.Select(preferred, excluded) == nil {
+		if attempt >= 1 || !h.pool.HasCandidate(preferred, excluded) {
 			if err != nil {
 				return nil, func() {}, err
 			}

@@ -57,6 +57,8 @@ func (h *configHandler) serveAdmin(w http.ResponseWriter, r *http.Request) bool 
 		report, err := h.SelectCredential(request.Provider, request.Credential)
 		writeAdminResult(w, report, err)
 		return true
+	case "/commandcode":
+		return h.serveCommandCode(w, r)
 	case "/model-listing/refresh":
 		if !adminMethod(w, r, http.MethodPost) {
 			return true

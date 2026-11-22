@@ -195,6 +195,16 @@ func validateProxyConfig(config proxyConfig) ([]effectiveRoute, error) {
 		if err := validateProviderListingProtocol(provider, where); err != nil {
 			failures = append(failures, err)
 		}
+		if provider.LoadBalance != nil && provider.Kind != "commandcode" {
+			failures = append(failures, fmt.Errorf("%s: loadBalance is only supported by commandcode providers", where))
+		}
+		if provider.RefreshInterval != "" {
+			if provider.Kind != "commandcode" {
+				failures = append(failures, fmt.Errorf("%s: refreshInterval is only supported by commandcode providers", where))
+			} else if interval, err := time.ParseDuration(provider.RefreshInterval); err != nil || interval <= 0 {
+				failures = append(failures, fmt.Errorf("%s: refreshInterval must be a positive duration", where))
+			}
+		}
 		if err := validateProviderModelListMode(provider, where); err != nil {
 			failures = append(failures, err)
 		}
@@ -689,6 +699,7 @@ func newConfigHandler(config proxyConfig, routes []effectiveRoute, logger *logut
 			h.commandCodePools = append(h.commandCodePools, pool)
 		}
 	}
+	reconcileCommandCodePools(config)
 	return h, nil
 }
 
@@ -760,8 +771,22 @@ func providerLegacyAuthFields(provider configProvider) []string {
 
 func applySelectedCredential(provider *configProvider) { provider.ApplySelected() }
 
+// maxAccountInFlight bounds a per-credential concurrency cap. The UI cannot
+// enter more, and a hand-written 10000 is a typo, not an intent.
+const maxAccountInFlight = 64
+
 func validateProviderCredential(kind string, cred configCredential, where string) []error {
 	var failures []error
+	if cred.MaxInFlight != nil {
+		if kind != "commandcode" {
+			failures = append(failures, fmt.Errorf("%s: maxInFlight is only supported by commandcode providers", where))
+		} else if *cred.MaxInFlight < 0 || *cred.MaxInFlight > maxAccountInFlight {
+			failures = append(failures, fmt.Errorf("%s: maxInFlight must be between 0 and %d", where, maxAccountInFlight))
+		}
+	}
+	if cred.Enabled != nil && kind != "commandcode" {
+		failures = append(failures, fmt.Errorf("%s: enabled is only supported by commandcode providers", where))
+	}
 	if cred.Home != "" && kind != "commandcode" && kind != "grok" {
 		failures = append(failures, fmt.Errorf("%s: home is only supported by commandcode and grok providers", where))
 	}
@@ -821,6 +846,9 @@ func credentialSelectionWarnings(config proxyConfig) []configDiagnostic {
 var (
 	commandCodePoolMu sync.Mutex
 	commandCodePools  = map[string]*commandcode.AccountPool{}
+	// commandCodeUsageFetcher is a test seam: nil uses the real Command Code
+	// usage client, tests replace it so no test touches the network.
+	commandCodeUsageFetcher commandcode.UsageFetcher
 )
 
 // commandCodeAccounts maps a provider's credential list to the pool's account
@@ -836,16 +864,77 @@ func commandCodeAccounts(provider modelcatalog.Provider) []commandcode.AccountCo
 		if name == "" {
 			name = home
 		}
-		accounts = append(accounts, commandcode.AccountConfig{Name: name, Home: home})
+		maxInFlight := 0
+		if credential.MaxInFlight != nil {
+			maxInFlight = *credential.MaxInFlight
+		}
+		accounts = append(accounts, commandcode.AccountConfig{
+			Name:        name,
+			Home:        home,
+			Disabled:    credential.Enabled != nil && !*credential.Enabled,
+			MaxInFlight: maxInFlight,
+			Selected:    credential.Selected,
+		})
 	}
 	if len(accounts) == 0 && strings.TrimSpace(provider.Home) != "" {
-		accounts = append(accounts, commandcode.AccountConfig{Name: "default", Home: provider.Home})
+		accounts = append(accounts, commandcode.AccountConfig{Name: "default", Home: provider.Home, Selected: true})
 	}
 	return accounts
 }
 
+// commandCodePoolSettings resolves the provider-level knobs: load balance
+// defaults to on when there is more than one credential.
+func commandCodePoolSettings(provider modelcatalog.Provider) commandcode.PoolSettings {
+	settings := commandcode.PoolSettings{LoadBalance: len(provider.Credentials) > 1}
+	if provider.LoadBalance != nil {
+		settings.LoadBalance = *provider.LoadBalance
+	}
+	if index := provider.SelectedCredentialIndex(); index >= 0 && index < len(provider.Credentials) {
+		credential := provider.Credentials[index]
+		settings.Selected = strings.TrimSpace(credential.Name)
+		if settings.Selected == "" {
+			settings.Selected = strings.TrimSpace(credential.Home)
+		}
+	}
+	if provider.RefreshInterval != "" {
+		if interval, err := time.ParseDuration(provider.RefreshInterval); err == nil {
+			settings.RefreshEvery = interval
+		}
+	}
+	return settings
+}
+
 func commandCodePoolKey(provider modelcatalog.Provider) string {
 	return provider.Name + "\x00" + provider.BaseURL + "\x00" + provider.Version
+}
+
+// reconcileCommandCodePools applies the current config to every commandcode
+// pool and closes pools whose provider is gone. It runs after each route-table
+// build, which is what makes a settings change take effect without a restart.
+func reconcileCommandCodePools(config proxyConfig) {
+	keep := make(map[string]bool, len(config.Providers))
+	for _, provider := range config.Providers {
+		if provider.Kind != "commandcode" {
+			continue
+		}
+		key := commandCodePoolKey(provider)
+		keep[key] = true
+		commandCodePoolMu.Lock()
+		pool := commandCodePools[key]
+		commandCodePoolMu.Unlock()
+		if pool != nil {
+			pool.Configure(commandCodeAccounts(provider), commandCodePoolSettings(provider))
+		}
+	}
+	commandCodePoolMu.Lock()
+	defer commandCodePoolMu.Unlock()
+	for key, pool := range commandCodePools {
+		if keep[key] {
+			continue
+		}
+		pool.Close()
+		delete(commandCodePools, key)
+	}
 }
 
 // commandCodePoolFor returns the provider's shared pool, building it on first
@@ -859,11 +948,15 @@ func commandCodePoolFor(provider modelcatalog.Provider) (*commandcode.AccountPoo
 	commandCodePoolMu.Lock()
 	defer commandCodePoolMu.Unlock()
 	if pool := commandCodePools[key]; pool != nil {
+		// A cached pool must still pick up settings changed in the config.
+		pool.Configure(accounts, commandCodePoolSettings(provider))
 		return pool, nil
 	}
 	pool, err := commandcode.NewAccountPool(accounts, commandcode.PoolOptions{
-		BaseURL: provider.BaseURL,
-		Version: provider.Version,
+		BaseURL:  provider.BaseURL,
+		Version:  provider.Version,
+		Settings: commandCodePoolSettings(provider),
+		Fetch:    commandCodeUsageFetcher,
 	})
 	if err != nil {
 		return nil, err

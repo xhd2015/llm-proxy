@@ -278,6 +278,9 @@ func (h *configHandler) reloadFrom(next proxyConfig, seeded []effectiveRoute) (i
 		handlers = built
 		status = seedListingStatus(next)
 	}
+	// Settings live on the pool, not the route table: apply them here so a
+	// reload is enough for a config change to take effect.
+	reconcileCommandCodePools(next)
 	h.applyRoutes(next, routes, handlers, status)
 	return len(routes), nil
 }
