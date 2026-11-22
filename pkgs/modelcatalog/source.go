@@ -35,18 +35,24 @@ type Provider struct {
 	// only the selected one. Nil means "on when more than one credential".
 	LoadBalance *bool `json:"loadBalance,omitempty"`
 	// RefreshInterval overrides the quota poll interval, e.g. "1m".
-	RefreshInterval string       `json:"refreshInterval,omitempty"`
-	Subscription    bool         `json:"subscription,omitempty"`
-	Home            string       `json:"home,omitempty"`
-	AuthFile        string       `json:"authFile,omitempty"`
-	Version         string       `json:"version,omitempty"`
-	BaseURL         string       `json:"baseUrl,omitempty"`
-	Protocol        string       `json:"protocol,omitempty"`
-	ModelListMode   string       `json:"modelListMode,omitempty"`
-	Token           string       `json:"token,omitempty"`
-	TokenFile       string       `json:"tokenFile,omitempty"`
-	DummyToken      string       `json:"dummyToken,omitempty"`
-	Credentials     []Credential `json:"credentials,omitempty"`
+	RefreshInterval string `json:"refreshInterval,omitempty"`
+	Subscription    bool   `json:"subscription,omitempty"`
+	Home            string `json:"home,omitempty"`
+	AuthFile        string `json:"authFile,omitempty"`
+	Version         string `json:"version,omitempty"`
+	BaseURL         string `json:"baseUrl,omitempty"`
+	Protocol        string `json:"protocol,omitempty"`
+	ModelListMode   string `json:"modelListMode,omitempty"`
+	// SessionHeader is the upstream header that should carry a conversation
+	// id (for example OpenCode Go's x-opencode-session). When set, the proxy
+	// copies the first nonempty incoming header from SessionHeaderSources,
+	// or from SessionHeader itself, onto that name. It does not invent an id.
+	SessionHeader        string       `json:"sessionHeader,omitempty"`
+	SessionHeaderSources []string     `json:"sessionHeaderSources,omitempty"`
+	Token                string       `json:"token,omitempty"`
+	TokenFile            string       `json:"tokenFile,omitempty"`
+	DummyToken           string       `json:"dummyToken,omitempty"`
+	Credentials          []Credential `json:"credentials,omitempty"`
 }
 
 // SelectedCredentialIndex preserves the config UI's first-selected, else first policy.

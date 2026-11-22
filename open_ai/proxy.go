@@ -45,6 +45,29 @@ type proxyOptions struct {
 	authorizationFile           string
 	modelCapabilities           map[string]ModelCapability
 	providerName                string
+	sessionHeader               string
+	sessionHeaderSources        []string
+}
+
+// defaultSessionHeaderSources are copied onto sessionHeader when the client
+// already identified the conversation under a different header name.
+var defaultSessionHeaderSources = []string{"X-Session-Id", "Session_id", "x-request-session"}
+
+// applySessionHeader copies a conversation id onto name. Incoming name wins;
+// otherwise the first nonempty source is used. Missing values stay missing.
+func applySessionHeader(h http.Header, name string, sources []string) {
+	if name == "" || h.Get(name) != "" {
+		return
+	}
+	if len(sources) == 0 {
+		sources = defaultSessionHeaderSources
+	}
+	for _, src := range sources {
+		if v := h.Get(src); v != "" {
+			h.Set(name, v)
+			return
+		}
+	}
 }
 
 func newProxyWithOptions(target *url.URL, modelMap map[string]string, verbose bool, opts proxyOptions) *httputil.ReverseProxy {
@@ -62,6 +85,7 @@ func newProxyWithOptions(target *url.URL, modelMap map[string]string, verbose bo
 		if opts.staticAuthorization != "" {
 			req.Header.Set("Authorization", "Bearer "+opts.staticAuthorization)
 		}
+		applySessionHeader(req.Header, opts.sessionHeader, opts.sessionHeaderSources)
 	}
 
 	proxy.Transport = &loggingTransport{

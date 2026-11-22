@@ -107,6 +107,12 @@ For example, `https://gateway.example/one/v1` receives `/one/v1/responses`, whil
 separate `http-proxy` providers when their API bases or protocols differ. No
 provider name, hostname, port, or path spelling selects special handling.
 
+An `http-proxy` provider may set `sessionHeader` to the upstream conversation
+header (OpenCode Go uses `x-opencode-session`). The proxy forwards that header
+when the client already sent it, and otherwise copies the first nonempty value
+from `sessionHeaderSources` (default `X-Session-Id`, `Session_id`,
+`x-request-session`). It does not invent a session id when none arrived.
+
 Variants cannot change `protocol` or `providerModelName`. An OpenAI Responses
 route exports to Codex directly; an Anthropic route requires `anthropic2openai`
 when a Responses client needs it. Do not add an adapter to a native Responses route.

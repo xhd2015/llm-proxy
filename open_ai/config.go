@@ -997,7 +997,7 @@ func buildProviderProtocolHandler(route effectiveRoute, endpoint string, logger 
 		if err != nil {
 			return nil, err
 		}
-		return newProxyWithOptions(target, map[string]string{route.clientModelName: route.providerModelName}, false, proxyOptions{stripPathPrefix: "/v1", fullLogger: logger, staticAuthorization: httpProxyStaticToken(provider), authorizationFile: provider.TokenFile, providerName: provider.Name}), nil
+		return newProxyWithOptions(target, map[string]string{route.clientModelName: route.providerModelName}, false, proxyOptions{stripPathPrefix: "/v1", fullLogger: logger, staticAuthorization: httpProxyStaticToken(provider), authorizationFile: provider.TokenFile, providerName: provider.Name, sessionHeader: provider.SessionHeader, sessionHeaderSources: append([]string(nil), provider.SessionHeaderSources...)}), nil
 	case "grok":
 		return grokapi.NewHandler(grokapi.HandlerOpts{Home: provider.Home, BaseURL: provider.BaseURL, Endpoint: endpoint, Logf: logger.Printf})
 	default:

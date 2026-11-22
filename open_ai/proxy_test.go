@@ -39,6 +39,46 @@ func (m *mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	}, nil
 }
 
+func TestApplySessionHeaderCopiesFirstSource(t *testing.T) {
+	header := http.Header{}
+	header.Set("Session_id", "codex-session")
+	applySessionHeader(header, "x-opencode-session", nil)
+	if got := header.Get("x-opencode-session"); got != "codex-session" {
+		t.Fatalf("session header = %q, want remapped Codex id", got)
+	}
+	header.Set("x-opencode-session", "already")
+	header.Set("Session_id", "other")
+	applySessionHeader(header, "x-opencode-session", nil)
+	if got := header.Get("x-opencode-session"); got != "already" {
+		t.Fatalf("session header = %q, want the incoming OpenCode value", got)
+	}
+}
+
+func TestProxySessionHeaderPassThroughAndRemap(t *testing.T) {
+	var gotSession, gotFrom string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSession = r.Header.Get("x-opencode-session")
+		gotFrom = r.Header.Get("Session_id")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	target, err := url.Parse(upstream.URL + "/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := newProxyWithOptions(target, nil, false, proxyOptions{stripPathPrefix: "/v1", sessionHeader: "x-opencode-session"})
+	req := httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/responses", strings.NewReader(`{"model":"m"}`))
+	req.Header.Set("Session_id", "from-codex")
+	rec := httptest.NewRecorder()
+	proxy.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+	if gotSession != "from-codex" || gotFrom != "from-codex" {
+		t.Fatalf("x-opencode-session=%q Session_id=%q", gotSession, gotFrom)
+	}
+}
+
 func TestProxyStaticAuthorizationReplacesIncomingHeader(t *testing.T) {
 	var gotAuthorization string
 	var gotPath string
