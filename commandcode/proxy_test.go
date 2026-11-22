@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	logutil "github.com/xhd2015/llm-proxy/log"
 )
 
 // capturedUpstream records the request it receives and replies with a scripted
@@ -422,7 +424,8 @@ func TestProxyVerboseLogsHeadersAndBody(t *testing.T) {
 	_, upstream := newUpstream(t, http.StatusOK, `{"type":"text-delta","text":"hi"}
 {"type":"finish","finishReason":"stop","totalUsage":{"inputTokens":1,"outputTokens":1}}
 `)
-	proxy := newTestProxyVerbose(t, upstream.URL, true)
+	var fullLog bytes.Buffer
+	proxy := newTestProxyOpts(t, upstream.URL, Options{Verbose: true, Logger: logutil.New(&fullLog)})
 	logs := captureLog(t)
 
 	req, err := http.NewRequest(http.MethodPost, proxy.URL+"/v1/messages",
@@ -439,11 +442,20 @@ func TestProxyVerboseLogsHeadersAndBody(t *testing.T) {
 	resp.Body.Close()
 
 	out := logs.String()
-	if !strings.Contains(out, "Body:") || !strings.Contains(out, "SECRETBODY") {
-		t.Errorf("-v should log the request body; got:\n%s", out)
+	// The terminal keeps a readable summary; the body itself goes to the log
+	// sink, where a small body stays verbatim under the digest policy.
+	if strings.Contains(out, "SECRETBODY") {
+		t.Errorf("-v should not dump the body to the terminal; got:\n%s", out)
+	}
+	if !strings.Contains(out, "Body: ") || !strings.Contains(out, "bytes") {
+		t.Errorf("-v should log a body size summary; got:\n%s", out)
 	}
 	if !strings.Contains(out, "X-Probe") {
 		t.Errorf("-v should log request headers; got:\n%s", out)
+	}
+	full := fullLog.String()
+	if !strings.Contains(full, "Body: bytes=") || !strings.Contains(full, "SECRETBODY") {
+		t.Errorf("full log should keep a small body verbatim; got:\n%s", full)
 	}
 }
 

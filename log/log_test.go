@@ -70,7 +70,7 @@ func TestResolveLogFile(t *testing.T) {
 func TestRotatingWriterCreatesRelativeCurrentSymlink(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "proxy.log")
 	now := time.Date(2026, time.September, 18, 15, 30, 0, 0, time.Local)
-	writer, err := newRotatingWriter(path, false)
+	writer, err := newRotatingWriter(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestRotatingWriterKeepsCurrentAndPreviousHour(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	writer, err := newRotatingWriter(path, false)
+	writer, err := newRotatingWriter(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestRotatingWriterRejectsLegacyRegularLog(t *testing.T) {
 	if err := os.WriteFile(path, []byte("legacy"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := newRotatingWriter(path, false); err == nil || !strings.Contains(err.Error(), "not a symlink") {
+	if _, err := newRotatingWriter(path); err == nil || !strings.Contains(err.Error(), "not a symlink") {
 		t.Fatalf("newRotatingWriter legacy file error = %v, want non-symlink error", err)
 	}
 }
@@ -144,7 +144,7 @@ func TestRotatingWriterProcessHelper(t *testing.T) {
 	if path == "" {
 		return
 	}
-	writer, err := newRotatingWriter(path, false)
+	writer, err := newRotatingWriter(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,12 +197,12 @@ func TestRotatingWritersAppendCompleteLinesAcrossProcesses(t *testing.T) {
 
 func TestRotatingWritersAppendCompleteLinesConcurrently(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "proxy.log")
-	first, err := newRotatingWriter(path, false)
+	first, err := newRotatingWriter(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer first.Close()
-	second, err := newRotatingWriter(path, false)
+	second, err := newRotatingWriter(path)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -46,9 +46,16 @@ Options:
   --normalize-anthropic-usage      replace null Anthropic stream usage token counters with 0;
                                    a compatibility workaround for strict clients such as Grok Build
   -v,--verbose                     show verbose info
-  --log FILE                       append full proxy logs to FILE while keeping terminal logs brief
+  --log FILE                       append proxy logs to FILE while keeping terminal logs brief
                                    (rotates hourly; FILE is a symlink to the current segment;
+                                   writes are queued and never block a request;
                                    default: /tmp/llm-proxy.log; --log=off disables file logging)
+  --log-body MODE                  body lines in the file log: digest (default; bodies over the
+                                   limit become size+sha256), full, or off
+  --log-body-limit SIZE            bodies at or below SIZE stay verbatim in digest mode
+                                   (default: 64KiB)
+  --log-buffer SIZE                in-memory queue budget for asynchronous log writes
+                                   (default: 4MiB)
   --color                          force color output on
   --no-color                       force color output off (NO_COLOR env also disables in auto)
   --open-ai                        start a local proxy to OpenAI with usage tracking
@@ -118,6 +125,9 @@ func Handle(args []string) error {
 	var modelCapabilityEntries []string
 	var port string
 	var logFile string
+	var logBody string
+	var logBodyLimit string
+	var logBuffer string
 	var filterTextSnapshot bool
 	var normalizeAnthropicUsage bool
 	var feedToGrokCLI bool
@@ -136,6 +146,9 @@ func Handle(args []string) error {
 		StringSlice("--model-capability", &modelCapabilityEntries).
 		String("--port", &port).
 		String("--log", &logFile).
+		String("--log-body", &logBody).
+		String("--log-body-limit", &logBodyLimit).
+		String("--log-buffer", &logBuffer).
 		Bool("--filter-text-snapshot", &filterTextSnapshot).
 		Bool("--normalize-anthropic-usage", &normalizeAnthropicUsage).
 		Bool("--feed-to-grok-cli", &feedToGrokCLI).
@@ -227,9 +240,17 @@ func Handle(args []string) error {
 		return err
 	}
 	colorEnabled := stderrColorEnabled(colorMode)
+	logOptions, err := logutil.OptionsFromFlags(logBody, logBodyLimit, logBuffer)
+	if err != nil {
+		return err
+	}
+	logutil.Configure(logOptions)
 	logFile, logDefaulted := logutil.ResolveLogFile(logFile)
 	if logDefaulted {
 		fmt.Fprintln(os.Stderr, grayNotice(colorEnabled, "full proxy log: %s (default; --log=off to disable)", logFile))
+	}
+	if logFile != "" && logOptions.BodyMode == logutil.BodyDigest {
+		fmt.Fprintln(os.Stderr, grayNotice(colorEnabled, "body log: digest (bodies over %s become size+sha256; --log-body=full keeps them)", logutil.FormatBytes(uint64(logOptions.BodyLimit))))
 	}
 	modelCaps, err := parseModelCapabilities(modelCapabilityEntries)
 	if err != nil {

@@ -181,6 +181,15 @@ func (h *handler) fullLogf(format string, args ...any) {
 	}
 }
 
+// logBody writes a request or response body under the sink's body policy: it
+// stays verbatim only when small or when --log-body=full is set, and becomes
+// size + digest otherwise.
+func (h *handler) logBody(label string, body []byte) {
+	if h.opts.Logger != nil {
+		h.opts.Logger.Body(label, body)
+	}
+}
+
 // messages translates an Anthropic Messages request to Command Code and streams
 // or buffers the Anthropic-shaped response back.
 func (h *handler) messages(w http.ResponseWriter, r *http.Request) {
@@ -208,10 +217,9 @@ func (h *handler) messages(w http.ResponseWriter, r *http.Request) {
 		effortLogNote(req.Model, req.OutputConfig.Effort, h.opts.EffortByModel))
 	if h.opts.Verbose {
 		logutil.LogHeaders(r.Header, h.logf)
-		h.logf("Body: %s", string(body))
-	} else {
-		h.fullLogf("Body: %s", string(body))
+		log.Printf("Body: %d bytes", len(body))
 	}
+	h.logBody("Body", body)
 
 	if err := unsupportedEffortError(req.Model, req.OutputConfig.Effort, h.opts.EffortByModel); err != nil {
 		h.logf("Invalid request: %v", err)

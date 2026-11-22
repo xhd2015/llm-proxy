@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"net/http"
@@ -8,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	logutil "github.com/xhd2015/llm-proxy/log"
 )
 
 func TestRewriteProxyPath(t *testing.T) {
@@ -116,10 +119,8 @@ func TestWebSocketFrameLoggerLogsFragmentedServerText(t *testing.T) {
 
 func TestWebSocketFrameLoggerSplitsBriefAndFullJSONLogs(t *testing.T) {
 	var terminalLogs []string
-	var fullLogs []string
-	logger := newWebSocketFrameLoggerWithFullLog("server->client", func(format string, args ...any) {
-		fullLogs = append(fullLogs, fmt.Sprintf(format, args...))
-	})
+	var fullBuf bytes.Buffer
+	logger := newWebSocketFrameLoggerWithFullLog("server->client", logutil.New(&fullBuf))
 	logger.logf = func(format string, args ...any) {
 		terminalLogs = append(terminalLogs, fmt.Sprintf(format, args...))
 	}
@@ -136,6 +137,7 @@ func TestWebSocketFrameLoggerSplitsBriefAndFullJSONLogs(t *testing.T) {
 	if !strings.Contains(terminalLogs[0], `response.usage.total_tokens=12`) {
 		t.Fatalf("terminal summary missing usage: %s", terminalLogs[0])
 	}
+	fullLogs := strings.Split(strings.TrimRight(fullBuf.String(), "\n"), "\n")
 	if len(fullLogs) != 2 {
 		t.Fatalf("full logs = %v, want message and usage logs", fullLogs)
 	}

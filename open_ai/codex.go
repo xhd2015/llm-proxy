@@ -302,7 +302,7 @@ func (c *loggingTransport) copyCodexSSE(src io.Reader, dst io.Writer) error {
 		}
 	}
 	if forwarded.Len() > 0 {
-		c.fullLogf("Response body: %s", forwarded.String())
+		c.logBody("Response body", forwarded.Bytes())
 	}
 	if c.usageLogFile != "" {
 		extractStreamingUsage(c.usageLogFile, forwarded.Bytes())
@@ -451,15 +451,15 @@ func headerHasToken(header http.Header, key string, token string) bool {
 	return false
 }
 
-func newWebSocketLoggingReadCloser(body io.ReadCloser, fullLogf func(format string, args ...any)) (io.ReadCloser, bool) {
+func newWebSocketLoggingReadCloser(body io.ReadCloser, fullLogger *logutil.Logger) (io.ReadCloser, bool) {
 	rwc, ok := body.(io.ReadWriteCloser)
 	if !ok {
 		return body, false
 	}
 	return &webSocketLoggingConn{
 		ReadWriteCloser: rwc,
-		fromBackend:     newWebSocketFrameLoggerWithFullLog("server->client", fullLogf),
-		toBackend:       newWebSocketFrameLoggerWithFullLog("client->server", fullLogf),
+		fromBackend:     newWebSocketFrameLoggerWithFullLog("server->client", fullLogger),
+		toBackend:       newWebSocketFrameLoggerWithFullLog("client->server", fullLogger),
 	}, true
 }
 
@@ -493,18 +493,25 @@ type webSocketFrameLogger struct {
 	fragmentOpcode  byte
 	fragmentPayload []byte
 	logf            func(format string, args ...any)
-	fullLogf        func(format string, args ...any)
+	fullLogger      *logutil.Logger
 }
 
 func newWebSocketFrameLogger(direction string) *webSocketFrameLogger {
 	return newWebSocketFrameLoggerWithFullLog(direction, nil)
 }
 
-func newWebSocketFrameLoggerWithFullLog(direction string, fullLogf func(format string, args ...any)) *webSocketFrameLogger {
+func newWebSocketFrameLoggerWithFullLog(direction string, fullLogger *logutil.Logger) *webSocketFrameLogger {
 	return &webSocketFrameLogger{
-		direction: direction,
-		logf:      log.Printf,
-		fullLogf:  fullLogf,
+		direction:  direction,
+		logf:       log.Printf,
+		fullLogger: fullLogger,
+	}
+}
+
+// logBody writes one WebSocket text frame under the sink's body policy.
+func (l *webSocketFrameLogger) logBody(label, text string) {
+	if l.fullLogger != nil {
+		l.fullLogger.BodyString(label, text)
 	}
 }
 
@@ -641,23 +648,23 @@ func (l *webSocketFrameLogger) logMessage(opcode byte, payload []byte) {
 	case 0x1:
 		textLog := formatWebSocketTextPayload(payload)
 		if textLog.isJSON {
-			if l.fullLogf != nil {
+			if l.fullLogger != nil {
 				l.logf("WebSocket %s text message (json): %s", l.direction, textLog.summary)
-				l.fullLogf("WebSocket %s text message (json): %s", l.direction, textLog.fullText)
+				l.logBody(fmt.Sprintf("WebSocket %s text message (json)", l.direction), textLog.fullText)
 			} else {
 				l.logf("WebSocket %s text message (json): %s", l.direction, textLog.text)
 			}
 			if len(textLog.usageInfo) > 0 {
 				usageText := strings.Join(textLog.usageInfo, ", ")
 				l.logf("WebSocket %s usage info: %s", l.direction, usageText)
-				if l.fullLogf != nil {
-					l.fullLogf("WebSocket %s usage info: %s", l.direction, usageText)
+				if l.fullLogger != nil {
+					l.fullLogger.Printf("WebSocket %s usage info: %s", l.direction, usageText)
 				}
 			}
 		} else {
-			if l.fullLogf != nil {
+			if l.fullLogger != nil {
 				l.logf("WebSocket %s text message: %d bytes", l.direction, len(payload))
-				l.fullLogf("WebSocket %s text message: %s", l.direction, textLog.fullText)
+				l.logBody(fmt.Sprintf("WebSocket %s text message", l.direction), textLog.fullText)
 			} else {
 				l.logf("WebSocket %s text message: %s", l.direction, textLog.text)
 			}

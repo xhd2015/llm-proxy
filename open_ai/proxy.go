@@ -185,9 +185,16 @@ func (c *loggingTransport) logRequest(req *http.Request, body []byte) {
 	c.logf("Request: %s %s", req.Method, req.URL.String())
 	if c.verbose {
 		logutil.LogHeaders(req.Header, c.logf)
-		c.logf("Body: %s", string(body))
-	} else if c.fullLogger != nil {
-		c.fullLogf("Body: %s", string(body))
+		log.Printf("Body: %d bytes", len(body))
+	}
+	c.logBody("Body", body)
+}
+
+// logBody writes a body under the sink's body policy: verbatim only when small
+// or when --log-body=full is set, size + digest otherwise.
+func (c *loggingTransport) logBody(label string, body []byte) {
+	if c.fullLogger != nil {
+		c.fullLogger.Body(label, body)
 	}
 }
 
@@ -294,11 +301,7 @@ func (c *loggingTransport) maybeLogWebSocket(req *http.Request, resp *http.Respo
 	if !c.logWebSocketMessages || resp.StatusCode != http.StatusSwitchingProtocols || !isWebSocketUpgrade(req.Header, resp.Header) {
 		return
 	}
-	var fullLogf func(format string, args ...any)
-	if c.fullLogger != nil {
-		fullLogf = c.fullLogf
-	}
-	body, ok := newWebSocketLoggingReadCloser(resp.Body, fullLogf)
+	body, ok := newWebSocketLoggingReadCloser(resp.Body, c.fullLogger)
 	if ok {
 		resp.Body = body
 		c.logf("WebSocket logging enabled: %s", req.URL.String())
@@ -342,7 +345,7 @@ func (c *loggingTransport) handleStreamingResponse(resp *http.Response) {
 	if c.filterTextSnapshot || c.normalizeAnthropicUsage {
 		respBody = normalizeStreamingResponse(respBody, c.filterTextSnapshot, c.normalizeAnthropicUsage)
 	}
-	c.fullLogf("Streaming Response body: %s", string(respBody))
+	c.logBody("Streaming Response body", respBody)
 	if c.usageLogFile != "" {
 		extractStreamingUsage(c.usageLogFile, respBody)
 	}
@@ -376,7 +379,7 @@ func (c *loggingTransport) handleNonStreamingResponse(resp *http.Response) (*htt
 	} else {
 		extractUsage(c.usageLogFile, respBody)
 	}
-	c.fullLogf("Response body: %s", string(respBody))
+	c.logBody("Response body", respBody)
 	replaceBody(resp, respBody)
 	return resp, nil
 }
