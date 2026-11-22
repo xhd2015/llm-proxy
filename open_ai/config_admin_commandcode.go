@@ -2,6 +2,7 @@ package openai
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"strconv"
@@ -10,6 +11,21 @@ import (
 
 	"github.com/xhd2015/llm-proxy/commandcode"
 )
+
+// commandCodeAccountUpdate is one credential's writable settings.
+type commandCodeAccountUpdate struct {
+	Name        string
+	Enabled     *bool
+	MaxInFlight *int
+}
+
+// commandCodeSettingsUpdate is the effect one PUT has on one provider.
+type commandCodeSettingsUpdate struct {
+	Provider        string
+	LoadBalance     *bool
+	RefreshInterval *string
+	Accounts        []commandCodeAccountUpdate
+}
 
 // commandCodeProviderView is one commandcode provider's settings plus its live
 // accounts, as GET /_llmproxy/commandcode reports them.
@@ -232,7 +248,11 @@ func (h *configHandler) SetCommandCodeSettings(update commandCodeSettingsUpdate)
 	if err != nil {
 		return ReloadReport{}, adminError(http.StatusInternalServerError, "read config: %v", err)
 	}
-	patched, changed, err := patchCommandCodeSettings([]byte(text), update)
+	config, err := decodeProxyConfig([]byte(text))
+	if err != nil {
+		return ReloadReport{}, adminError(http.StatusBadRequest, "%v", err)
+	}
+	changed, err := applyCommandCodeSettings(&config, update)
 	if err != nil {
 		return ReloadReport{}, adminError(http.StatusBadRequest, "%v", err)
 	}
@@ -240,7 +260,11 @@ func (h *configHandler) SetCommandCodeSettings(update commandCodeSettingsUpdate)
 	if !changed {
 		return ReloadReport{Listen: current.Listen, Endpoint: h.endpoint, Models: len(h.modelsSnapshot()), Providers: len(current.Providers)}, nil
 	}
-	next, seeded, diagnostics := inspectProxyConfigBytes(patched)
+	encoded, err := encodeProxyConfig(config)
+	if err != nil {
+		return ReloadReport{}, adminError(http.StatusInternalServerError, "%v", err)
+	}
+	next, seeded, diagnostics := inspectProxyConfigBytes(encoded)
 	if err := diagnosticErrors(diagnostics); err != nil {
 		return ReloadReport{}, adminError(http.StatusBadRequest, "settings: %v", err)
 	}
@@ -265,7 +289,7 @@ func (h *configHandler) SetCommandCodeSettings(update commandCodeSettingsUpdate)
 	if _, err := h.buildRouteTable(seeded); err != nil {
 		return ReloadReport{}, adminError(http.StatusInternalServerError, "settings: %v", err)
 	}
-	if _, _, err := configSaveText(store, string(patched), revision); err != nil {
+	if _, _, err := configSaveText(store, string(encoded), revision); err != nil {
 		return ReloadReport{}, adminError(http.StatusConflict, "write config: %v", err)
 	}
 	models, err := h.reloadFrom(next, seeded)
@@ -279,6 +303,60 @@ func (h *configHandler) SetCommandCodeSettings(update commandCodeSettingsUpdate)
 		Models:    models,
 		Providers: len(next.Providers),
 	}, nil
+}
+
+// applyCommandCodeSettings mutates the parsed config in place. It reports
+// whether any value changed, so a no-op PUT leaves the file untouched.
+func applyCommandCodeSettings(config *proxyConfig, update commandCodeSettingsUpdate) (bool, error) {
+	for i := range config.Providers {
+		provider := &config.Providers[i]
+		if provider.Name != update.Provider {
+			continue
+		}
+		changed := false
+		if update.LoadBalance != nil {
+			if provider.LoadBalance == nil || *provider.LoadBalance != *update.LoadBalance {
+				value := *update.LoadBalance
+				provider.LoadBalance = &value
+				changed = true
+			}
+		}
+		if update.RefreshInterval != nil {
+			value := strings.TrimSpace(*update.RefreshInterval)
+			if provider.RefreshInterval != value {
+				provider.RefreshInterval = value
+				changed = true
+			}
+		}
+		for _, account := range update.Accounts {
+			index := credentialIndexByName(provider, account.Name)
+			if index < 0 {
+				return false, fmt.Errorf("provider %q has no credential %q", update.Provider, account.Name)
+			}
+			credential := &provider.Credentials[index]
+			if account.Enabled != nil && (credential.Enabled == nil || *credential.Enabled != *account.Enabled) {
+				value := *account.Enabled
+				credential.Enabled = &value
+				changed = true
+			}
+			if account.MaxInFlight != nil && (credential.MaxInFlight == nil || *credential.MaxInFlight != *account.MaxInFlight) {
+				value := *account.MaxInFlight
+				credential.MaxInFlight = &value
+				changed = true
+			}
+		}
+		return changed, nil
+	}
+	return false, fmt.Errorf("config has no provider %q", update.Provider)
+}
+
+func credentialIndexByName(provider *configProvider, name string) int {
+	for i := range provider.Credentials {
+		if provider.Credentials[i].Name == name {
+			return i
+		}
+	}
+	return -1
 }
 
 // commandCodeUpdateApplied verifies the validated config carries what the

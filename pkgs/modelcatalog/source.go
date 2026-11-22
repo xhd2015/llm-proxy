@@ -14,19 +14,19 @@ import (
 // Credential and Provider are the configuration schema shared with the config UI.
 // They contain secrets: do not use them as an HTTP response or session record.
 type Credential struct {
-	Name     string `json:"name"`
-	Selected bool   `json:"selected"`
-	Home     string `json:"home"`
+	Name     string `json:"name,omitempty"`
+	Selected bool   `json:"selected,omitempty"`
+	Home     string `json:"home,omitempty"`
 	// MaxInFlight caps how many requests this credential serves at once.
 	// Nil or 0 means unlimited.
 	MaxInFlight *int `json:"maxInFlight,omitempty"`
 	// Enabled parks a credential without deleting it. Nil means enabled.
 	Enabled    *bool  `json:"enabled,omitempty"`
-	AuthFile   string `json:"authFile"`
-	BaseURL    string `json:"baseUrl"`
-	Token      string `json:"token"`
-	TokenFile  string `json:"tokenFile"`
-	DummyToken string `json:"dummyToken"`
+	AuthFile   string `json:"authFile,omitempty"`
+	BaseURL    string `json:"baseUrl,omitempty"`
+	Token      string `json:"token,omitempty"`
+	TokenFile  string `json:"tokenFile,omitempty"`
+	DummyToken string `json:"dummyToken,omitempty"`
 }
 type Provider struct {
 	Name string `json:"name"`
@@ -36,17 +36,17 @@ type Provider struct {
 	LoadBalance *bool `json:"loadBalance,omitempty"`
 	// RefreshInterval overrides the quota poll interval, e.g. "1m".
 	RefreshInterval string       `json:"refreshInterval,omitempty"`
-	Subscription    bool         `json:"subscription"`
-	Home            string       `json:"home"`
-	AuthFile        string       `json:"authFile"`
-	Version         string       `json:"version"`
-	BaseURL         string       `json:"baseUrl"`
-	Protocol        string       `json:"protocol"`
-	ModelListMode   string       `json:"modelListMode"`
-	Token           string       `json:"token"`
-	TokenFile       string       `json:"tokenFile"`
-	DummyToken      string       `json:"dummyToken"`
-	Credentials     []Credential `json:"credentials"`
+	Subscription    bool         `json:"subscription,omitempty"`
+	Home            string       `json:"home,omitempty"`
+	AuthFile        string       `json:"authFile,omitempty"`
+	Version         string       `json:"version,omitempty"`
+	BaseURL         string       `json:"baseUrl,omitempty"`
+	Protocol        string       `json:"protocol,omitempty"`
+	ModelListMode   string       `json:"modelListMode,omitempty"`
+	Token           string       `json:"token,omitempty"`
+	TokenFile       string       `json:"tokenFile,omitempty"`
+	DummyToken      string       `json:"dummyToken,omitempty"`
+	Credentials     []Credential `json:"credentials,omitempty"`
 }
 
 // SelectedCredentialIndex preserves the config UI's first-selected, else first policy.

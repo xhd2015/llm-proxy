@@ -348,29 +348,35 @@ func (h *configHandler) SelectCredential(providerName, credentialName string) (S
 	if err != nil {
 		return SelectReport{}, adminError(http.StatusInternalServerError, "read config: %v", err)
 	}
-	patched, changed, err := patchCredentialSelection([]byte(text), providerName, credentialName)
+	config, err := decodeProxyConfig([]byte(text))
+	if err != nil {
+		return SelectReport{}, adminError(http.StatusBadRequest, "%v", err)
+	}
+	changed, err := applyCredentialSelection(&config, providerName, credentialName)
 	if err != nil {
 		return SelectReport{}, adminError(http.StatusNotFound, "%v", err)
 	}
+	current := h.configSnapshot()
 	if !changed {
-		current := h.configSnapshot()
-		models := len(h.modelsSnapshot())
 		return SelectReport{
 			Provider:   providerName,
 			Credential: credentialName,
 			Previous:   currentProviderCredentialName(current, providerName),
 			Changed:    false,
 			Listen:     current.Listen,
-			Models:     models,
+			Models:     len(h.modelsSnapshot()),
 			Providers:  len(current.Providers),
 		}, nil
 	}
 
-	next, seeded, diagnostics := inspectProxyConfigBytes(patched)
+	encoded, err := encodeProxyConfig(config)
+	if err != nil {
+		return SelectReport{}, adminError(http.StatusInternalServerError, "%v", err)
+	}
+	next, seeded, diagnostics := inspectProxyConfigBytes(encoded)
 	if err := diagnosticErrors(diagnostics); err != nil {
 		return SelectReport{}, adminError(http.StatusBadRequest, "select %s/%s: %v", providerName, credentialName, err)
 	}
-	current := h.configSnapshot()
 	if next.Listen != current.Listen {
 		return SelectReport{}, adminError(http.StatusConflict,
 			"selecting %s/%s would change listen from %q to %q", providerName, credentialName, current.Listen, next.Listen)
@@ -395,7 +401,7 @@ func (h *configHandler) SelectCredential(providerName, credentialName string) (S
 		return SelectReport{}, adminError(http.StatusInternalServerError, "select %s/%s: %v", providerName, credentialName, err)
 	}
 
-	_, backupPath, err := configSaveText(store, string(patched), revision)
+	_, backupPath, err := configSaveText(store, string(encoded), revision)
 	if err != nil {
 		if errors.Is(err, errConfigWebChanged) {
 			return SelectReport{}, adminError(http.StatusConflict, "%v", err)
@@ -414,12 +420,41 @@ func (h *configHandler) SelectCredential(providerName, credentialName string) (S
 		Credential:   credentialName,
 		Previous:     currentProviderCredentialName(current, providerName),
 		Changed:      true,
-		BackupPath:   backupPath,
 		Listen:       next.Listen,
 		Models:       models,
 		Providers:    len(next.Providers),
+		BackupPath:   backupPath,
 		RefreshAfter: refreshAfter,
 	}, nil
+}
+
+// applyCredentialSelection flips the selected flags of one provider so that only
+// the named credential is selected.
+func applyCredentialSelection(config *proxyConfig, providerName, credentialName string) (bool, error) {
+	for i := range config.Providers {
+		provider := &config.Providers[i]
+		if provider.Name != providerName {
+			continue
+		}
+		found := false
+		changed := false
+		for j := range provider.Credentials {
+			credential := &provider.Credentials[j]
+			if credential.Name == credentialName {
+				found = true
+			}
+			want := credential.Name == credentialName
+			if credential.Selected != want {
+				credential.Selected = want
+				changed = true
+			}
+		}
+		if !found {
+			return false, fmt.Errorf("provider %q has no credential %q", providerName, credentialName)
+		}
+		return changed, nil
+	}
+	return false, fmt.Errorf("config has no provider %q", providerName)
 }
 
 func currentProviderCredentialName(config proxyConfig, name string) string {

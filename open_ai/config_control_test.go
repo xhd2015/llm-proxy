@@ -14,142 +14,6 @@ import (
 	"testing"
 )
 
-// ---------------------------------------------------------------------------
-// byte-preserving selection patcher
-// ---------------------------------------------------------------------------
-
-const patchFixture = `{
-  "listen": "127.0.0.1:8890",
-  "providers": [
-    {
-      "name": "commandcode",
-      "kind": "commandcode",
-      "credentials": [
-        {
-          "selected": true,
-          "name": "one",
-          "home": "/tmp/one"
-        },
-        {
-          "name": "two",
-          "home": "/tmp/two"
-        }
-      ]
-    }
-  ],
-  "models": []
-}
-`
-
-func TestPatchCredentialSelectionRewritesOnlySelectedFlags(t *testing.T) {
-	patched, changed, err := patchCredentialSelection([]byte(patchFixture), "commandcode", "two")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !changed {
-		t.Fatal("switch to a different credential must change the file")
-	}
-	want := strings.Replace(patchFixture,
-		`          "selected": true,
-          "name": "one",`,
-		`          "selected": false,
-          "name": "one",`, 1)
-	want = strings.Replace(want,
-		`        {
-          "name": "two",`,
-		`        {
-          "selected": true,
-          "name": "two",`, 1)
-	if string(patched) != want {
-		t.Fatalf("patched bytes\n--- got ---\n%s\n--- want ---\n%s", patched, want)
-	}
-	// One credential gains an inserted member, the other flips true to false.
-	if len(patched) != len(patchFixture)+len(`          "selected": true,
-`)+1 {
-		t.Fatalf("unexpected growth: %d -> %d", len(patchFixture), len(patched))
-	}
-
-	again, changed, err := patchCredentialSelection(patched, "commandcode", "two")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if changed || string(again) != string(patched) {
-		t.Fatalf("patching an already selected credential must be a no-op (changed=%v)", changed)
-	}
-}
-
-func TestPatchCredentialSelectionReportsUnknownNames(t *testing.T) {
-	for _, tc := range []struct{ provider, credential, want string }{
-		{"missing", "one", `config has no provider "missing"`},
-		{"commandcode", "missing", `provider "commandcode" has no credential "missing"`},
-	} {
-		_, _, err := patchCredentialSelection([]byte(patchFixture), tc.provider, tc.credential)
-		if err == nil || !strings.Contains(err.Error(), tc.want) {
-			t.Fatalf("%s/%s: err = %v, want %q", tc.provider, tc.credential, err, tc.want)
-		}
-	}
-	if _, _, err := patchCredentialSelection([]byte(`{"models":[]}`), "p", "c"); err == nil {
-		t.Fatal("a config without providers must fail")
-	}
-	if _, _, err := patchCredentialSelection([]byte(`{"providers":[{"name":"p"}]}`), "p", "c"); err == nil {
-		t.Fatal("a provider without credentials must fail")
-	}
-	if _, _, err := patchCredentialSelection([]byte(`not json`), "p", "c"); err == nil {
-		t.Fatal("invalid JSON must fail")
-	}
-}
-
-// TestPatchCredentialSelectionOnLiveConfigShape exercises the patch against the
-// real config when it is present, checking that every changed leaf is a
-// credential's selected flag and that key order elsewhere survives.
-func TestPatchCredentialSelectionOnLiveConfigShape(t *testing.T) {
-	source, err := os.ReadFile(filepath.Join(os.Getenv("HOME"), ".config", "llm-proxy", "config.json"))
-	if err != nil {
-		t.Skipf("no live config to check against: %v", err)
-	}
-	var before map[string]any
-	if err := json.Unmarshal(source, &before); err != nil {
-		t.Fatal(err)
-	}
-	target := map[string]string{}
-	for _, provider := range sliceOfMaps(before["providers"]) {
-		name, _ := provider["name"].(string)
-		seen := map[string]bool{}
-		duplicate := false
-		for _, credential := range sliceOfMaps(provider["credentials"]) {
-			credentialName, _ := credential["name"].(string)
-			if credentialName == "" {
-				continue
-			}
-			duplicate = duplicate || seen[credentialName]
-			seen[credentialName] = true
-			target[name] = credentialName
-		}
-		if duplicate {
-			delete(target, name)
-			t.Logf("skipping %s: duplicate credential names", name)
-		}
-	}
-	if len(target) == 0 {
-		t.Skip("live config defines no credentials")
-	}
-	for provider, credential := range target {
-		patched, _, err := patchCredentialSelection(source, provider, credential)
-		if err != nil {
-			t.Fatalf("%s/%s: %v", provider, credential, err)
-		}
-		var after map[string]any
-		if err := json.Unmarshal(patched, &after); err != nil {
-			t.Fatalf("%s/%s produced invalid JSON: %v", provider, credential, err)
-		}
-		for _, path := range differingLeaves(before, after) {
-			if !strings.HasSuffix(path, ".selected") || !strings.Contains(path, "providers[") {
-				t.Fatalf("%s/%s changed unrelated field %s", provider, credential, path)
-			}
-		}
-	}
-}
-
 func sliceOfMaps(value any) []map[string]any {
 	items, _ := value.([]any)
 	out := make([]map[string]any, 0, len(items))
@@ -480,9 +344,16 @@ func TestSelectCredentialMovesNewTrafficWithoutInterruptingInFlight(t *testing.T
 	if updated == original {
 		t.Fatal("config file was not rewritten")
 	}
-	patched, changed, err := patchCredentialSelection([]byte(updated), "gateway", "two")
-	if err != nil || changed || string(patched) != updated {
-		t.Fatalf("file should already record the new selection (changed=%v err=%v)", changed, err)
+	var stored proxyConfig
+	if err := json.Unmarshal([]byte(updated), &stored); err != nil {
+		t.Fatal(err)
+	}
+	selected, ok := providerByName(stored, "gateway")
+	if !ok {
+		t.Fatal("gateway provider missing from the rewritten file")
+	}
+	if index := selected.SelectedCredentialIndex(); index < 0 || selected.Credentials[index].Name != "two" {
+		t.Fatal("rewritten file does not record the new selection")
 	}
 
 	again, err := handler.SelectCredential("gateway", "two")

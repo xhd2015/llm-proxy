@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/xhd2015/llm-proxy/commandcode"
+	"github.com/xhd2015/llm-proxy/pkgs/modelcatalog"
 )
 
 // resetCommandCodePools clears the provider-keyed pool cache between tests.
@@ -176,7 +177,7 @@ func TestAdminCommandCodeSettingsApplyWithoutRestart(t *testing.T) {
 	}
 }
 
-func TestAdminCommandCodeSettingsPreserveTheRestOfTheFile(t *testing.T) {
+func TestAdminCommandCodeSettingsRewriteKeepsEverythingElse(t *testing.T) {
 	handler, path := newCommandCodeTestHandler(t)
 	before := readFile(t, path)
 	response := serveLocal(t, handler, http.MethodPut, AdminPrefix+"/commandcode", `{"accounts": [{"name": "one", "maxInFlight": 3}]}`)
@@ -187,11 +188,61 @@ func TestAdminCommandCodeSettingsPreserveTheRestOfTheFile(t *testing.T) {
 	if !strings.Contains(after, `"maxInFlight": 3`) {
 		t.Fatalf("setting missing:\n%s", after)
 	}
-	// Removing the inserted member must give the original text back, which is
-	// what proves nothing else was re-serialized.
-	restored := strings.Replace(after, "          \"maxInFlight\": 3,\n", "", 1)
-	if restored != before {
-		t.Fatalf("write rewrote unrelated bytes:\n--- before ---\n%s\n--- after ---\n%s", before, after)
+	// A full re-encode must still mean exactly one semantic change.
+	var beforeJSON, afterJSON any
+	if err := json.Unmarshal([]byte(before), &beforeJSON); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(after), &afterJSON); err != nil {
+		t.Fatal(err)
+	}
+	differences := differingLeaves(beforeJSON, afterJSON)
+	if len(differences) != 1 || !strings.HasSuffix(differences[0], "credentials[0].maxInFlight") {
+		t.Fatalf("rewrite changed more than the edited field: %v", differences)
+	}
+	// The rewrite is idempotent: the same PUT must not touch the file again.
+	again := serveLocal(t, handler, http.MethodPut, AdminPrefix+"/commandcode", `{"accounts": [{"name": "one", "maxInFlight": 3}]}`)
+	if again.Code != http.StatusOK {
+		t.Fatalf("second status = %d: %s", again.Code, again.Body)
+	}
+	if readFile(t, path) != after {
+		t.Fatal("an unchanged setting rewrote the file")
+	}
+}
+
+func TestEncodeProxyConfigKeepsTheDiskShape(t *testing.T) {
+	enabled := true
+	config := proxyConfig{
+		Listen: "127.0.0.1:8890",
+		Providers: []configProvider{{
+			Name:        "commandcode",
+			Kind:        "commandcode",
+			Credentials: []modelcatalog.Credential{{Name: "one", Home: "/h/one", Enabled: &enabled}},
+		}},
+		Models: []configModel{{
+			Protocol:          "anthropic-messages",
+			Provider:          "commandcode",
+			ProviderModelName: "m",
+			ClientModelName:   "commandcode/served",
+			BaseInstructions:  "if a < b && c > d",
+		}},
+	}
+	encoded, err := encodeProxyConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	if !strings.HasSuffix(text, "\n") {
+		t.Fatal("encoded config must end with a newline")
+	}
+	if strings.Contains(text, "\\u003c") {
+		t.Fatalf("HTML escaping leaked into the file:\n%s", text)
+	}
+	if !strings.Contains(text, `"baseInstructions": "if a < b && c > d"`) {
+		t.Fatalf("instructions changed:\n%s", text)
+	}
+	if strings.Contains(text, `"authFile"`) || strings.Contains(text, `"selected"`) {
+		t.Fatalf("empty optional fields were written:\n%s", text)
 	}
 }
 

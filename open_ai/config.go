@@ -26,16 +26,16 @@ import (
 
 type proxyConfig struct {
 	Listen       string              `json:"listen"`
-	Log          string              `json:"log"`
-	ModelListing *configModelListing `json:"modelListing"`
+	Log          string              `json:"log,omitempty"`
+	ModelListing *configModelListing `json:"modelListing,omitempty"`
 	Providers    []configProvider    `json:"providers"`
 	Models       []configModel       `json:"models"`
 }
 
 type configModelListing struct {
 	Mode            string `json:"mode"`
-	RefreshInterval string `json:"refreshInterval"`
-	ProbeTimeout    string `json:"probeTimeout"`
+	RefreshInterval string `json:"refreshInterval,omitempty"`
+	ProbeTimeout    string `json:"probeTimeout,omitempty"`
 }
 
 type configProvider = modelcatalog.Provider
@@ -48,47 +48,47 @@ type configInput struct {
 }
 
 type configReasoning struct {
-	Disabled       bool               `json:"disabled"`
-	DefaultEffort  string             `json:"defaultEffort"`
-	EffortsMapping map[string]*string `json:"effortsMapping"`
+	Disabled       bool               `json:"disabled,omitempty"`
+	DefaultEffort  string             `json:"defaultEffort,omitempty"`
+	EffortsMapping map[string]*string `json:"effortsMapping,omitempty"`
 }
 
 type configModel struct {
 	Protocol          string            `json:"protocol"`
 	Provider          string            `json:"provider"`
 	ProviderModelName string            `json:"providerModelName"`
-	ClientModelName   string            `json:"clientModelName"`
-	DisplayName       string            `json:"displayName"`
-	ProtocolAdapter   string            `json:"protocolAdapter"`
-	BaseInstructions  string            `json:"baseInstructions"`
-	Inputs            []configInput     `json:"inputs"`
-	ContextWindow     *int              `json:"contextWindow"`
-	MaxTokens         *int              `json:"maxTokens"`
-	Compat            map[string]bool   `json:"compat"`
-	Reasoning         *configReasoning  `json:"reasoning"`
-	NoImage           *bool             `json:"noImage"`
-	AdjustUsageForDSH *bool             `json:"adjustUsageForDSH"`
-	FeedToGrokCli     *bool             `json:"feedToGrokCli"`
-	EffortMapping     map[string]string `json:"effortMapping"`
-	Excluded          *bool             `json:"excluded"`
-	Variants          []configVariant   `json:"variants"`
+	ClientModelName   string            `json:"clientModelName,omitempty"`
+	DisplayName       string            `json:"displayName,omitempty"`
+	ProtocolAdapter   string            `json:"protocolAdapter,omitempty"`
+	BaseInstructions  string            `json:"baseInstructions,omitempty"`
+	Inputs            []configInput     `json:"inputs,omitempty"`
+	ContextWindow     *int              `json:"contextWindow,omitempty"`
+	MaxTokens         *int              `json:"maxTokens,omitempty"`
+	Compat            map[string]bool   `json:"compat,omitempty"`
+	Reasoning         *configReasoning  `json:"reasoning,omitempty"`
+	NoImage           *bool             `json:"noImage,omitempty"`
+	AdjustUsageForDSH *bool             `json:"adjustUsageForDSH,omitempty"`
+	FeedToGrokCli     *bool             `json:"feedToGrokCli,omitempty"`
+	EffortMapping     map[string]string `json:"effortMapping,omitempty"`
+	Excluded          *bool             `json:"excluded,omitempty"`
+	Variants          []configVariant   `json:"variants,omitempty"`
 }
 
 type configVariant struct {
 	ClientModelName   string            `json:"clientModelName"`
-	AgentRunners      []string          `json:"agentRunners"`
-	DisplayName       string            `json:"displayName"`
-	ProtocolAdapter   string            `json:"protocolAdapter"`
-	BaseInstructions  string            `json:"baseInstructions"`
-	Inputs            []configInput     `json:"inputs"`
-	ContextWindow     *int              `json:"contextWindow"`
-	MaxTokens         *int              `json:"maxTokens"`
-	Compat            map[string]bool   `json:"compat"`
-	Reasoning         *configReasoning  `json:"reasoning"`
-	NoImage           *bool             `json:"noImage"`
-	AdjustUsageForDSH *bool             `json:"adjustUsageForDSH"`
-	FeedToGrokCli     *bool             `json:"feedToGrokCli"`
-	EffortMapping     map[string]string `json:"effortMapping"`
+	AgentRunners      []string          `json:"agentRunners,omitempty"`
+	DisplayName       string            `json:"displayName,omitempty"`
+	ProtocolAdapter   string            `json:"protocolAdapter,omitempty"`
+	BaseInstructions  string            `json:"baseInstructions,omitempty"`
+	Inputs            []configInput     `json:"inputs,omitempty"`
+	ContextWindow     *int              `json:"contextWindow,omitempty"`
+	MaxTokens         *int              `json:"maxTokens,omitempty"`
+	Compat            map[string]bool   `json:"compat,omitempty"`
+	Reasoning         *configReasoning  `json:"reasoning,omitempty"`
+	NoImage           *bool             `json:"noImage,omitempty"`
+	AdjustUsageForDSH *bool             `json:"adjustUsageForDSH,omitempty"`
+	FeedToGrokCli     *bool             `json:"feedToGrokCli,omitempty"`
+	EffortMapping     map[string]string `json:"effortMapping,omitempty"`
 }
 
 type effectiveRoute struct {
