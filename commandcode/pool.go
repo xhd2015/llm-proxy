@@ -230,6 +230,13 @@ func NewAccountPool(configs []AccountConfig, opts PoolOptions) (*AccountPool, er
 		pool.byName[name] = entry
 	}
 	if !opts.DisableRefresh {
+		// Refresh once before serving: with every quota unknown, the tie-break
+		// has nothing to weigh and the first conversations would land on an
+		// arbitrary account (possibly the exhausted one, costing a failover).
+		// Bounded so an unreachable API cannot hold startup for long.
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		pool.Refresh(ctx)
+		cancel()
 		pool.wg.Add(1)
 		go pool.loop()
 	}
@@ -258,7 +265,6 @@ func (p *AccountPool) Len() int {
 // together do not poll in lockstep.
 func (p *AccountPool) loop() {
 	defer p.wg.Done()
-	p.Refresh(context.Background())
 	for {
 		wait := p.every
 		if p.every > 10*time.Millisecond {
